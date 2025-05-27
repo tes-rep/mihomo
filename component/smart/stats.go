@@ -17,7 +17,7 @@ import (
 )
 
 var (
-    shardedLocks [256]*sync.RWMutex
+    shardedLocks [1024]*sync.RWMutex
     shardedLocksOnce sync.Once
 )
 
