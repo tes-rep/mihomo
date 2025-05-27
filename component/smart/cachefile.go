@@ -230,7 +230,7 @@ func (s *Store) BatchSave(operations []StoreOperation) error {
     }
     
     if err != nil {
-        log.Debugln("[SmartStore] Batch save operation failed:", err)
+        log.Debugln("[SmartStore] Batch save operation failed: %v", err)
     }
     
     return err
