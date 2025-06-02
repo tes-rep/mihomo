@@ -415,7 +415,7 @@ func (m *WeightModel) PredictWeight(input *ModelInput, priorityFactor float64) (
     model := m.model
     m.mutex.RUnlock()
     
-    if m.model == nil {
+    if model == nil { 
         return smart.CalculateWeight(
             input.Success, 
             input.Failure, 
@@ -466,7 +466,7 @@ func (m *WeightModel) PredictWeight(input *ModelInput, priorityFactor float64) (
         }
     }()
     
-    prediction = m.model.PredictSingle(features, 0)
+    prediction = model.PredictSingle(features, 0)
     
     if math.IsNaN(prediction) {
         return smart.CalculateWeight(
