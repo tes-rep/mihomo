@@ -1333,8 +1333,6 @@ func (s *Smart) registerClosureMetricsCallback(c C.Conn, proxy C.Proxy, metadata
                 return
             }
         }
-
-        log.Debugln("[Smart] No tracker found for connection closure")
     })
 }
 
@@ -1353,8 +1351,6 @@ func (s *Smart) registerPacketClosureMetricsCallback(pc C.PacketConn, proxy C.Pr
                 return
             }
         }
-        
-        log.Debugln("[Smart] No tracker found for connection closure")
     })
 }
 

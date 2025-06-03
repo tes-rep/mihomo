@@ -221,9 +221,6 @@ func (p *Proxy) URLTest(ctx context.Context, url string, expectedStatus utils.In
 		return
 	}
 
-	//add UUID for smart group tracker
-	p.UUIDToMetadata(&addr)
-
 	start := time.Now()
 	instance, err := p.DialContext(ctx, &addr)
 	if err != nil {
@@ -320,9 +317,4 @@ func urlToMetadata(rawURL string) (addr C.Metadata, err error) {
 
 	err = addr.SetRemoteAddress(net.JoinHostPort(u.Hostname(), port))
 	return
-}
-
-func (p *Proxy) UUIDToMetadata(metadata *C.Metadata) {
-    trackerUUID := utils.NewUUIDV4()
-    metadata.UUID = trackerUUID.String()
 }
