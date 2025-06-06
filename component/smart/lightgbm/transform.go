@@ -14,13 +14,13 @@ import (
 // The expected format is as follows:
 //
 // [transforms]
-// [feature_order]
+// [order]
 // 0=success
 // 1=failure
 // ... (index=feature_name, one per line, up to MaxFeatureSize)
-// [/feature_order]
+// [/order]
 //
-// [transform_definitions]
+// [definitions]
 // std_type=StandardScaler
 // std_features=2,3,4,5,6,7,15
 // std_mean=...comma separated float values...
@@ -30,15 +30,15 @@ import (
 // robust_features=0,1
 // robust_center=...comma separated float values...
 // robust_scale=...comma separated float values...
-// [/transform_definitions]
+// [/definitions]
 //
 // untransformed_features=8:is_udp,9:is_tcp,10:asn_feature,...
-// has_transforms=true
+// transform=true
 // [/transforms]
 //
 // - Each transform block (e.g. std_*, robust_*) must include:
 //   - *_type: the transform type, e.g. "StandardScaler" or "RobustScaler"
-//   - *_features: comma-separated feature indices (int, based on feature_order)
+//   - *_features: comma-separated feature indices (int, based on order)
 //   - other parameters: comma-separated float values, length must match features
 // - All indices and parameter arrays must match the feature order and count.
 // - Only features listed in *_features are transformed; others remain unchanged.
@@ -58,10 +58,10 @@ type TransformParams struct {
 }
 
 type FeatureTransforms struct {
-    HasTransforms      bool                        `json:"has_transforms"`
-    FeatureOrder       map[int]string             `json:"feature_order"`
-    Transforms         []TransformParams          `json:"transforms"`
-    UntransformedFeatures []string               `json:"untransformed_features"`
+    TransformsEnabled      bool                        `json:"transforms_enabled"`
+    FeatureOrder           map[int]string              `json:"order"`
+    Transforms             []TransformParams           `json:"transforms"`
+    UntransformedFeatures  []string                    `json:"untransformed_features"`
 }
 
 var transformPool = sync.Pool{
@@ -107,9 +107,9 @@ func LoadTransformsFromModel(modelPath string) (*FeatureTransforms, error) {
     startIdx := strings.Index(content, startMarker)
     if startIdx == -1 {
         return &FeatureTransforms{
-            HasTransforms: false,
-            FeatureOrder:  getDefaultFeatureOrder(),
-            Transforms:    []TransformParams{},
+            TransformsEnabled: false,
+            FeatureOrder:      getDefaultFeatureOrder(),
+            Transforms:        []TransformParams{},
         }, nil
     }
 
@@ -172,7 +172,7 @@ func parseTransformsContent(content string) (*FeatureTransforms, error) {
         value := strings.TrimSpace(parts[1])
 
         switch currentSection {
-        case "feature_order":
+        case "order":
             idx, err := strconv.Atoi(key)
             if err != nil {
                 errors = append(errors, fmt.Sprintf("invalid feature index '%s' at line %d", key, lineNum+1))
@@ -184,7 +184,7 @@ func parseTransformsContent(content string) (*FeatureTransforms, error) {
             }
             featureTransforms.FeatureOrder[idx] = value
 
-        case "transform_definitions":
+        case "definitions":
             if strings.Contains(key, "_") {
                 parts := strings.SplitN(key, "_", 2)
                 if len(parts) == 2 {
@@ -200,8 +200,8 @@ func parseTransformsContent(content string) (*FeatureTransforms, error) {
 
         default:
             switch key {
-            case "has_transforms":
-                featureTransforms.HasTransforms = value == "true"
+            case "transform":
+                featureTransforms.TransformsEnabled = value == "true"
             case "untransformed_features":
                 featureTransforms.UntransformedFeatures = parseStringArray(value)
             }
@@ -359,7 +359,7 @@ func getDefaultFeatureOrder() map[int]string {
 }
 
 func (ft *FeatureTransforms) ApplyTransforms(features []float64) []float64 {
-    if ft == nil || !ft.HasTransforms || len(ft.Transforms) == 0 {
+    if ft == nil || !ft.TransformsEnabled || len(ft.Transforms) == 0 {
         return features
     }
 
@@ -465,7 +465,7 @@ func (ft *FeatureTransforms) ValidateTransforms(expectedFeatureCount int) error 
         return fmt.Errorf("FeatureTransforms is nil")
     }
 
-    if !ft.HasTransforms {
+    if !ft.TransformsEnabled {
         return nil
     }
 
@@ -553,6 +553,6 @@ func (ft *FeatureTransforms) DebugTransforms() {
     }
 
     log.Debugln("[Smart] FeatureTransforms: enabled=%v, features=%d, transforms=%d [%s], untransformed=%v",
-        ft.HasTransforms, len(ft.FeatureOrder), len(ft.Transforms),
+        ft.TransformsEnabled, len(ft.FeatureOrder), len(ft.Transforms),
         strings.Join(transformSummary, ", "), ft.UntransformedFeatures)
 }

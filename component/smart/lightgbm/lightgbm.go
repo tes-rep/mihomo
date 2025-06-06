@@ -385,15 +385,15 @@ func (m *WeightModel) loadModel(path string) error {
     if err != nil {
         log.Warnln("[Smart] Failed to load transforms parameters: %v, using default config", err)
         transforms = &FeatureTransforms{
-            HasTransforms: false,
+            TransformsEnabled: false,
             FeatureOrder:  getDefaultFeatureOrder(),
             Transforms:    []TransformParams{},
         }
     } else {
-        if transforms.HasTransforms {
+        if transforms.TransformsEnabled {
             if err := transforms.ValidateTransforms(MaxFeatureSize); err != nil {
                 log.Warnln("[Smart] ValidateTransforms failed: %v", err)
-                transforms.HasTransforms = false
+                transforms.TransformsEnabled = false
             } else {
                 transforms.DebugTransforms()
             }
@@ -432,7 +432,7 @@ func (m *WeightModel) PredictWeight(input *ModelInput, priorityFactor float64) (
     }
     
     // 应用特征变换
-    if transforms != nil && transforms.HasTransforms {
+    if transforms != nil && transforms.TransformsEnabled {
         features = transforms.ApplyTransforms(features)
     }
     
