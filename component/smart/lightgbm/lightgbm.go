@@ -19,7 +19,7 @@ import (
 )
 
 const (
-    MaxFeatureSize = 25  // 最大特征数量
+    MaxFeatureSize = 21  // 特征数量
 )
 
 var (
@@ -32,7 +32,7 @@ var (
     
     // 常见ASN提供商类型分类
     asnCategories = map[string]int{
-        // 全球科技巨头
+        // 全球科技
         "google":      1,
         "amazon":      2,
         "microsoft":   3,
@@ -298,7 +298,6 @@ var (
         "qq", "msn", "icq", "line", "kakao", "viber", "imo", "element",
     }
     
-    // IP类型标识
     privateIPNetworks = []struct {
         prefix   netip.Prefix
         category int
@@ -318,14 +317,13 @@ var (
     }
 )
 
-// 封装 LightGBM 模型
 type WeightModel struct {
     model       *leaves.Ensemble
+    transforms  *FeatureTransforms
     lastUpdate  time.Time
     mutex       sync.RWMutex
 }
 
-// 传入模型的特征数据
 type ModelInput struct {
     // 节点历史性能指标
     Success         int64   // 成功次数
@@ -373,19 +371,36 @@ func GetModel() *WeightModel {
     return globalModel
 }
 
-// 加载模型文件
 func (m *WeightModel) loadModel(path string) error {
     m.mutex.Lock()
     defer m.mutex.Unlock()
     
-    model, err := leaves.LGEnsembleFromFile(path, true)
+    model, err := leaves.LGEnsembleFromFile(path, false)
     if err != nil {
-        model, err = leaves.LGEnsembleFromFile(path, false)
-        if err != nil {
-            return fmt.Errorf("failed to load binary model: %v", err)
+        return fmt.Errorf("failed to load binary model: %v", err)
+    }
+
+    // 加载transforms参数
+    transforms, err := LoadTransformsFromModel(path)
+    if err != nil {
+        log.Warnln("[Smart] Failed to load transforms parameters: %v, using default config", err)
+        transforms = &FeatureTransforms{
+            HasTransforms: false,
+            FeatureOrder:  getDefaultFeatureOrder(),
+            Transforms:    []TransformParams{},
+        }
+    } else {
+        if transforms.HasTransforms {
+            if err := transforms.ValidateTransforms(MaxFeatureSize); err != nil {
+                log.Warnln("[Smart] ValidateTransforms failed: %v", err)
+                transforms.HasTransforms = false
+            } else {
+                transforms.DebugTransforms()
+            }
         }
     }
     
+    m.transforms = transforms
     m.model = model
     m.lastUpdate = time.Now()
     return nil
@@ -393,17 +408,7 @@ func (m *WeightModel) loadModel(path string) error {
 
 func (m *WeightModel) PredictWeight(input *ModelInput, priorityFactor float64) (float64, bool) {
     if m == nil {
-        return smart.CalculateWeight(
-            input.Success, 
-            input.Failure, 
-            input.ConnectTime, 
-            input.Latency, 
-            input.IsUDP,
-            input.UploadTotal, 
-            input.DownloadTotal, 
-            input.ConnectionDuration,
-            input.LastUsed,
-        ) * priorityFactor, false
+        return m.fallbackPrediction(input, priorityFactor), false
     }
 
     total := input.Success + input.Failure
@@ -413,92 +418,54 @@ func (m *WeightModel) PredictWeight(input *ModelInput, priorityFactor float64) (
 
     m.mutex.RLock()
     model := m.model
+    transforms := m.transforms
     m.mutex.RUnlock()
     
-    if model == nil { 
-        return smart.CalculateWeight(
-            input.Success, 
-            input.Failure, 
-            input.ConnectTime, 
-            input.Latency, 
-            input.IsUDP,
-            input.UploadTotal, 
-            input.DownloadTotal, 
-            input.ConnectionDuration,
-            input.LastUsed,
-        ) * priorityFactor, false
+    if model == nil {
+        return m.fallbackPrediction(input, priorityFactor), false
     }
     
+    // 准备原始特征
     features := prepareFeatures(input)
-    
     if len(features) == 0 {
-        return smart.CalculateWeight(
-            input.Success, 
-            input.Failure, 
-            input.ConnectTime, 
-            input.Latency, 
-            input.IsUDP,
-            input.UploadTotal, 
-            input.DownloadTotal, 
-            input.ConnectionDuration,
-            input.LastUsed,
-        ) * priorityFactor, false
+        return m.fallbackPrediction(input, priorityFactor), false
+    }
+    
+    // 应用特征变换
+    if transforms != nil && transforms.HasTransforms {
+        features = transforms.ApplyTransforms(features)
     }
     
     var prediction float64
-    var modelPredicted bool = true
     
     defer func() {
         if r := recover(); r != nil {
-            log.Errorln("[Smart] Error occurred during model prediction: %v", r)
-            prediction = smart.CalculateWeight(
-                input.Success, 
-                input.Failure, 
-                input.ConnectTime, 
-                input.Latency, 
-                input.IsUDP,
-                input.UploadTotal, 
-                input.DownloadTotal, 
-                input.ConnectionDuration,
-                input.LastUsed,
-            ) * priorityFactor
-            modelPredicted = false
+            log.Errorln("[Smart] Model prediction panic: %v", r)
+            prediction = m.fallbackPrediction(input, priorityFactor)
         }
     }()
     
     prediction = model.PredictSingle(features, 0)
     
-    if math.IsNaN(prediction) {
-        return smart.CalculateWeight(
-            input.Success, 
-            input.Failure, 
-            input.ConnectTime, 
-            input.Latency, 
-            input.IsUDP,
-            input.UploadTotal, 
-            input.DownloadTotal, 
-            input.ConnectionDuration,
-            input.LastUsed,
-        ) * priorityFactor, false
+    if math.IsNaN(prediction) || prediction <= 0 {
+        return m.fallbackPrediction(input, priorityFactor), false
     }
     
-    if prediction <= 0 {
-        return smart.CalculateWeight(
-            input.Success, 
-            input.Failure, 
-            input.ConnectTime, 
-            input.Latency, 
-            input.IsUDP,
-            input.UploadTotal, 
-            input.DownloadTotal, 
-            input.ConnectionDuration,
-            input.LastUsed,
-        ) * priorityFactor, false
-    }
-    
-    finalWeight := prediction * priorityFactor
-    
-    return finalWeight, modelPredicted
+    return prediction * priorityFactor, true
+}
+
+func (m *WeightModel) fallbackPrediction(input *ModelInput, priorityFactor float64) float64 {
+    return smart.CalculateWeight(
+        input.Success,
+        input.Failure,
+        input.ConnectTime,
+        input.Latency,
+        input.IsUDP,
+        input.UploadTotal,
+        input.DownloadTotal,
+        input.ConnectionDuration,
+        input.LastUsed,
+    ) * priorityFactor
 }
 
 func min(a, b int) int {
@@ -509,17 +476,25 @@ func min(a, b int) int {
 }
 
 func hashStringToFloat(s string, buckets int) float64 {
-    if s == "" {
+    if s == "" || buckets <= 0 {
         return 0.0
     }
-    hash := uint32(2166136261)
+    
+    // FNV-1a
+    const (
+        fnvOffsetBasis uint32 = 2166136261
+        fnvPrime       uint32 = 16777619
+    )
+    
+    hash := fnvOffsetBasis
     for i := 0; i < len(s); i++ {
-        hash = (hash * 16777619) ^ uint32(s[i])
+        hash = hash ^ uint32(s[i])
+        hash = hash * fnvPrime
     }
-    return float64(hash % uint32(buckets) + 1) // 0为缺省，1~N为有效
+    
+    return float64((hash % uint32(buckets)) + 1)
 }
 
-// 准备模型输入特征
 func prepareFeatures(input *ModelInput) []float64 {
     if input == nil {
         return []float64{}
@@ -613,7 +588,6 @@ func prepareFeatures(input *ModelInput) []float64 {
     return features
 }
 
-// 提取ASN特征
 func extractASNFeature(asnInfo string) int {
     if asnInfo == "" {
         return 0
@@ -650,7 +624,6 @@ func extractASNFeature(asnInfo string) int {
     return 0
 }
 
-// 提取GeoIP特征
 func extractGeoIPFeature(geoIPInfo []string) int {
     if geoIPInfo == nil || len(geoIPInfo) == 0 {
         return 0
@@ -679,7 +652,6 @@ func extractGeoIPFeature(geoIPInfo []string) int {
     return 0  // 默认未知
 }
 
-// 提取域名类型特征
 func extractDomainTypeFeature(host string) int {
     if host == "" {
         return 0
@@ -742,26 +714,22 @@ func extractDomainTypeFeature(host string) int {
     return 0
 }
 
-// 提取IP特征 - 直接IP连接时使用
 func extractIPFeature(ipAddr string) int {
     if ipAddr == "" {
         return 0
     }
-    
-    // 尝试解析IP地址
+
     addr, err := netip.ParseAddr(ipAddr)
     if err != nil {
         return 0
     }
-    
-    // 检测是否为私有IP
+
     for _, network := range privateIPNetworks {
         if network.prefix.Contains(addr) {
             return network.category + 100  // 101-104为不同私有IP类型
         }
     }
     
-    // 区分IPv4和IPv6
     if addr.Is4() {
         return 110  // IPv4公网地址
     } else {
@@ -769,7 +737,6 @@ func extractIPFeature(ipAddr string) int {
     }
 }
 
-// 提取端口特征
 func extractPortFeature(port uint16) int {
     // 1. 检查是否为已知端口
     if category, exists := wellKnownPorts[port]; exists {
@@ -809,7 +776,6 @@ func extractPortFeature(port uint16) int {
     return 0  // 未知端口类型
 }
 
-// 推导连接类型 - 综合端口和地址特征
 func deriveConnectionType(port uint16, addressFeature, portFeature int) int {
     // 网页浏览特征
     if port == 80 || port == 443 || portFeature == 4 || portFeature == 5 || 
@@ -869,7 +835,6 @@ func boolToFloat(b bool) float64 {
     return 0.0
 }
 
-// 从节点统计信息创建模型输入
 func CreateModelInputFromStats(success, failure, connectTime, latency int64, 
     isUDP bool, isTCP bool, uploadTotal, downloadTotal float64, 
     connectionDuration float64, lastUsed int64, metadata *C.Metadata) *ModelInput {
@@ -900,7 +865,6 @@ func CreateModelInputFromStats(success, failure, connectTime, latency int64,
     return input
 }
 
-// 从统计记录创建模型输入
 func CreateModelInputFromStatsRecord(record *smart.StatsRecord, metadata *C.Metadata, 
     uploadTotal, downloadTotal int64, connectionDuration int64) *ModelInput {
     

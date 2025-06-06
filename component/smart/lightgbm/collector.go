@@ -20,7 +20,6 @@ var (
     collectorInitOnce sync.Once
 )
 
-// DataCollector 负责收集训练数据
 type DataCollector struct {
     mutex       sync.Mutex
     sampleCount int
@@ -38,7 +37,6 @@ const (
     defaultSampleRate   = 1.0
 )
 
-// GetCollector 获取或创建数据收集器
 func GetCollector() *DataCollector {
     collectorInitOnce.Do(func() {
         globalCollector = &DataCollector{
@@ -51,7 +49,6 @@ func GetCollector() *DataCollector {
     return globalCollector
 }
 
-// AddSample 添加样本数据
 func (c *DataCollector) AddSample(input *ModelInput, metadata *C.Metadata, actualWeight float64, weightSource string) {
     if c == nil || metadata == nil || input == nil {
         return
@@ -109,7 +106,7 @@ func (c *DataCollector) AddSample(input *ModelInput, metadata *C.Metadata, actua
         featureStrings[i] = fmt.Sprintf("%.6f", f)
     }
     
-    // 收集原始元数据字符串（用于后续分析）
+    // 收集原始元数据字符串
     var geoIPStr string
     if metadata.DstGeoIP != nil {
         geoIPStr = strings.Join(metadata.DstGeoIP, ",")
@@ -151,6 +148,11 @@ func (c *DataCollector) AddSample(input *ModelInput, metadata *C.Metadata, actua
         standardizedSource,
         time.Now().Format(time.RFC3339),
     )
+
+    expectedColumns := MaxFeatureSize + 10
+    if len(sample) != expectedColumns {
+        return
+    }
     
     if err := c.writer.Write(sample); err != nil {
         log.Warnln("[Smart] Failed to write training data: %v", err)
@@ -165,7 +167,6 @@ func (c *DataCollector) AddSample(input *ModelInput, metadata *C.Metadata, actua
     }
 }
 
-// 初始化CSV文件
 func (c *DataCollector) initializeWriter() error {
     var err error
 
@@ -240,7 +241,6 @@ func (c *DataCollector) initializeWriter() error {
     return nil
 }
 
-// 强制写入所有缓存的数据
 func (c *DataCollector) Flush() error {
     if c == nil {
         return nil
