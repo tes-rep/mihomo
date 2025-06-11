@@ -10,7 +10,6 @@ import (
     "sync"
     "time"
     "strconv"
-    "regexp"
     "math/rand"
     "sync/atomic"
 
@@ -26,6 +25,8 @@ import (
     N "github.com/metacubex/mihomo/common/net"
     "github.com/metacubex/mihomo/tunnel"
     "github.com/metacubex/mihomo/tunnel/statistic"
+
+    "github.com/dlclark/regexp2"
 )
 
 const (
@@ -84,7 +85,7 @@ type Smart struct {
 type (
     priorityRule struct {
         pattern      string
-        regex        *regexp.Regexp
+        regex        *regexp2.Regexp
         factor       float64
         isRegex      bool
     }
@@ -880,19 +881,6 @@ func (s *Smart) cleanupOrphanedNodeCache() {
 	}
 }
 
-func (s *Smart) getPriorityFactor(proxyName string) float64 {
-    for _, rule := range s.policyPriority {
-        if rule.isRegex && rule.regex != nil {
-            if rule.regex.MatchString(proxyName) {
-                return rule.factor
-            }
-        } else if strings.Contains(proxyName, rule.pattern) {
-            return rule.factor
-        }
-    }
-    return 1.0
-}
-
 func (s *Smart) checkNodeQualityDegradation(domain, proxyName string, newWeight, oldWeight float64, connectionDuration int64, downloadTotal float64, uploadTotal float64, weightType string, asnInfo string) {
     // 识别并处理0流量连接
     if connectionDuration > 0 && downloadTotal == 0 && uploadTotal == 0 && connectionDuration > 1000 {
@@ -1478,33 +1466,48 @@ func (s *Smart) cleanupDegradedNodePreferenceCache(domain string, nodeName strin
     }
 }
 
+func (s *Smart) getPriorityFactor(proxyName string) float64 {
+    for _, rule := range s.policyPriority {
+        if rule.isRegex && rule.regex != nil {
+            if matched, _ := rule.regex.MatchString(proxyName); matched {
+                return rule.factor
+            }
+        } else if strings.Contains(proxyName, rule.pattern) {
+            return rule.factor
+        }
+    }
+    return 1.0
+}
+
 func smartWithPolicyPriority(policyPriority string) smartOption {
     return func(s *Smart) {
         pairs := strings.Split(policyPriority, ";")
         for _, pair := range pairs {
             kv := strings.SplitN(pair, ":", 2)
-            if len(kv) == 2 {
-                pattern := kv[0]
-                if factor, err := strconv.ParseFloat(kv[1], 64); err == nil {
-                    if factor <= 0 {
-                        log.Warnln("[Smart] Invalid priority factor %.2f for pattern '%s', factor must be positive", factor, pattern)
-                        continue
-                    }
-                    
-                    rule := priorityRule{
-                        pattern: pattern,
-                        factor: factor,
-                    }
-                    
-                    if re, err := regexp.Compile(pattern); err == nil {
-                        rule.regex = re
-                        rule.isRegex = true
-                    }
-                    
-                    s.policyPriority = append(s.policyPriority, rule)
-                } else {
-                    log.Warnln("[Smart] Invalid priority factor format for pattern '%s': %v", pattern, err)
+            if len(kv) != 2 || strings.TrimSpace(kv[1]) == "" {
+                log.Warnln("[Smart] Invalid policy-priority rule: '%s', must be in 'pattern:factor' format and factor is required", pair)
+                continue
+            }
+            pattern := kv[0]
+            if factor, err := strconv.ParseFloat(kv[1], 64); err == nil {
+                if factor <= 0 {
+                    log.Warnln("[Smart] Invalid priority factor %.2f for pattern '%s', factor must be positive", factor, pattern)
+                    continue
                 }
+
+                rule := priorityRule{
+                    pattern: pattern,
+                    factor:  factor,
+                }
+
+                if re, err := regexp2.Compile(pattern, regexp2.None); err == nil {
+                    rule.regex = re
+                    rule.isRegex = true
+                }
+
+                s.policyPriority = append(s.policyPriority, rule)
+            } else {
+                log.Warnln("[Smart] Invalid priority factor format for pattern '%s': %v", pattern, err)
             }
         }
     }
