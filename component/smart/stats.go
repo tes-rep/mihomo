@@ -117,32 +117,94 @@ func (m *AtomicRecordManager) GetOrCreateAtomicRecord(cacheKey string, store *St
 
 // 创建统计快照
 func (record *AtomicStatsRecord) CreateStatsSnapshot() *StatsRecord {
-    success := record.Get("success").(int64)
-    failure := record.Get("failure").(int64)
-    connectTime := record.Get("connectTime").(int64)
-    latency := record.Get("latency").(int64)
-    lastUsed := record.Get("lastUsed").(int64)
-    
-    weights := record.Get("weights")
-    var weightsMap map[string]float64
-    if weights != nil {
-        weightsMap = weights.(map[string]float64)
+    if record == nil {
+        return &StatsRecord{
+            Weights: make(map[string]float64),
+        }
     }
     
-    uploadTotal := record.Get("uploadTotal").(float64)
-    downloadTotal := record.Get("downloadTotal").(float64)
-    duration := record.Get("duration").(float64)
+    success := record.Get("success")
+    failure := record.Get("failure")
+    connectTime := record.Get("connectTime")
+    latency := record.Get("latency")
+    lastUsed := record.Get("lastUsed")
+    uploadTotal := record.Get("uploadTotal")
+    downloadTotal := record.Get("downloadTotal")
+    duration := record.Get("duration")
+    weights := record.Get("weights")
+    
+    var successVal, failureVal, connectTimeVal, latencyVal, lastUsedVal int64
+    var uploadTotalVal, downloadTotalVal, durationVal float64
+    var weightsMap map[string]float64
+    
+    if success != nil {
+        if val, ok := success.(int64); ok {
+            successVal = val
+        }
+    }
+    
+    if failure != nil {
+        if val, ok := failure.(int64); ok {
+            failureVal = val
+        }
+    }
+    
+    if connectTime != nil {
+        if val, ok := connectTime.(int64); ok {
+            connectTimeVal = val
+        }
+    }
+    
+    if latency != nil {
+        if val, ok := latency.(int64); ok {
+            latencyVal = val
+        }
+    }
+    
+    if lastUsed != nil {
+        if val, ok := lastUsed.(int64); ok {
+            lastUsedVal = val
+        }
+    }
+    
+    if uploadTotal != nil {
+        if val, ok := uploadTotal.(float64); ok {
+            uploadTotalVal = val
+        }
+    }
+    
+    if downloadTotal != nil {
+        if val, ok := downloadTotal.(float64); ok {
+            downloadTotalVal = val
+        }
+    }
+    
+    if duration != nil {
+        if val, ok := duration.(float64); ok {
+            durationVal = val
+        }
+    }
+    
+    if weights != nil {
+        if val, ok := weights.(map[string]float64); ok {
+            weightsMap = val
+        } else {
+            weightsMap = make(map[string]float64)
+        }
+    } else {
+        weightsMap = make(map[string]float64)
+    }
     
     return &StatsRecord{
-        Success:            success,
-        Failure:            failure,
-        ConnectTime:        connectTime,
-        Latency:            latency,
-        LastUsed:           time.Unix(lastUsed, 0),
+        Success:            successVal,
+        Failure:            failureVal,
+        ConnectTime:        connectTimeVal,
+        Latency:            latencyVal,
+        LastUsed:           time.Unix(lastUsedVal, 0),
         Weights:            weightsMap,
-        UploadTotal:        uploadTotal,
-        DownloadTotal:      downloadTotal,
-        ConnectionDuration: duration,
+        UploadTotal:        uploadTotalVal,
+        DownloadTotal:      downloadTotalVal,
+        ConnectionDuration: durationVal,
     }
 }
 
@@ -1250,17 +1312,15 @@ func (s *Store) GetNodeStates(group, config string) (map[string][]byte, error) {
         }
     }
     
-    globalCacheLock.Lock()
     for nodeName, data := range result {
         cacheKey := FormatCacheKey(KeyTypeNode, config, group, nodeName)
         var nodeState NodeState
         if json.Unmarshal(data, &nodeState) == nil {
-            dataCache.Set(cacheKey, nodeState)
+            SetCacheValue(cacheKey, nodeState)
         } else {
-            dataCache.Set(cacheKey, data)
+            SetCacheValue(cacheKey, data)
         }
     }
-    globalCacheLock.Unlock()
     
     globalQueueMutex.Lock()
     for _, op := range globalOperationQueue {
@@ -1277,9 +1337,7 @@ func (s *Store) GetNodeStates(group, config string) (map[string][]byte, error) {
 func (s *Store) GetStatsForDomain(group, config, domain string) (map[string][]byte, error) {
     cacheKeyPrefix := FormatCacheKey(KeyTypeStats, config, group, domain)
     
-    globalCacheLock.RLock()
-    cacheResults := dataCache.FilterByKeyPrefix(cacheKeyPrefix)
-    globalCacheLock.RUnlock()
+    cacheResults := GetCacheValuesByPrefix(cacheKeyPrefix)
     
     if len(cacheResults) > 0 {
         result := make(map[string][]byte, len(cacheResults))
@@ -1340,13 +1398,11 @@ func (s *Store) GetStatsForDomain(group, config, domain string) (map[string][]by
             
             cacheKey := FormatCacheKey(KeyTypeStats, config, group, domain, nodeName)
             var record StatsRecord
-            globalCacheLock.Lock()
             if json.Unmarshal(data, &record) == nil {
-                dataCache.Set(cacheKey, record)
+                SetCacheValue(cacheKey, record)
             } else {
-                dataCache.Set(cacheKey, data)
+                SetCacheValue(cacheKey, data)
             }
-            globalCacheLock.Unlock()
         }
     }
     
@@ -1365,9 +1421,7 @@ func (s *Store) GetStatsForDomain(group, config, domain string) (map[string][]by
 func (s *Store) GetAllStats(group, config string, all bool) (map[string]map[string][]byte, error) {
     cacheKeyPrefix := FormatCacheKey(KeyTypeStats, config, group, "")
     
-    globalCacheLock.RLock()
-    cacheResults := dataCache.FilterByKeyPrefix(cacheKeyPrefix)
-    globalCacheLock.RUnlock()
+    cacheResults := GetCacheValuesByPrefix(cacheKeyPrefix)
 
     globalCacheParams.mutex.RLock()
     configMaxDomains := globalCacheParams.MaxDomains
@@ -1484,13 +1538,11 @@ func (s *Store) GetAllStats(group, config string, all bool) (map[string]map[stri
         
         cacheKey := FormatCacheKey(KeyTypeStats, config, group, domain, node)
         var record StatsRecord
-        globalCacheLock.Lock()
         if json.Unmarshal(data, &record) == nil {
-            dataCache.Set(cacheKey, record)
+            SetCacheValue(cacheKey, record)
         } else {
-            dataCache.Set(cacheKey, data)
+            SetCacheValue(cacheKey, data)
         }
-        globalCacheLock.Unlock()
     }
 
     globalQueueMutex.Lock()
@@ -1670,18 +1722,14 @@ func (s *Store) RemoveNodesData(group, config string, nodes []string) error {
             log.Warnln("[SmartStore] Failed to delete node state for %s: %v", nodeName, err)
         }
         
-        globalCacheLock.Lock()
         cacheKey := FormatCacheKey(KeyTypeNode, config, group, nodeName)
-        dataCache.Delete(cacheKey)
-        globalCacheLock.Unlock()
+        DeleteCacheValue(cacheKey)
     }
     
     for domain, nodeNames := range domainNodePairs {
         for _, nodeName := range nodeNames {
-            globalCacheLock.Lock()
             statsCacheKey := FormatCacheKey(KeyTypeStats, config, group, domain, nodeName)
-            dataCache.Delete(statsCacheKey)
-            globalCacheLock.Unlock()
+            DeleteCacheValue(statsCacheKey)
             
             statsPath := FormatDBKey("smart", KeyTypeStats, config, group, domain, nodeName)
             if err := s.DeleteByPath(statsPath); err != nil {
@@ -1706,14 +1754,13 @@ func (s *Store) MarkConnectionFailed(group, config, host string) {
 
     groupKey := fmt.Sprintf("%s:%s", group, config)
     
-    globalCacheLock.Lock()
     key := FormatCacheKey(KeyTypeFailed, config, group, domain)
-    dataCache.Set(key, time.Now())
-    failedCount := 0
+    SetCacheValue(key, time.Now())
+    
     failedPrefix := FormatCacheKey(KeyTypeFailed, config, group, "")
-    failedDomains := dataCache.FilterByKeyPrefix(failedPrefix)
-    failedCount = len(failedDomains)
-    globalCacheLock.Unlock()
+    failedDomains := GetCacheValuesByPrefix(failedPrefix)
+    failedCount := len(failedDomains)
+
 
     if failedCount >= NetworkFailureThreshold {
         s.failureStatusLock.Lock()
@@ -1752,10 +1799,8 @@ func (s *Store) MarkConnectionSuccess(group, config string) {
                 group, config, s.successCount[groupKey])
             s.successCount[groupKey] = 0
             
-            globalCacheLock.Lock()
             failedPrefix := FormatCacheKey(KeyTypeFailed, config, group, "")
-            dataCache.RemoveByKeyPrefix(failedPrefix)
-            globalCacheLock.Unlock()
+            RemoveCacheValuesByPrefix(failedPrefix)
         }
     }
 }

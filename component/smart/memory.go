@@ -88,7 +88,10 @@ func (s *Store) StorePrefetchResult(group, config string, target string, weightT
     if found {
         switch v := existingValue.(type) {
         case map[string]string:
-            prefetchMap = v
+            prefetchMap = make(map[string]string, len(v)+1)
+            for k, v := range v {
+                prefetchMap[k] = v
+            }
         default:
             prefetchMap = make(map[string]string)
         }
@@ -131,14 +134,14 @@ func (s *Store) GetPrefetchResult(group, config string, target string, weightTyp
     
     cacheKey := FormatCacheKey(KeyTypePrefetch, config, group, target)
     
-    var prefetchMap map[string]string
     var proxyName string
     
     if value, ok := GetCacheValue(cacheKey); ok {
         switch v := value.(type) {
         case map[string]string:
-            prefetchMap = v
-            proxyName = v[weightType]
+            if name, exists := v[weightType]; exists {
+                proxyName = name
+            }
         default:
         }
     }
@@ -151,6 +154,7 @@ func (s *Store) GetPrefetchResult(group, config string, target string, weightTyp
     
     data, err := s.DBViewGetItem(dbKey)
     if err == nil && data != nil {
+        var prefetchMap map[string]string
         if err = json.Unmarshal(data, &prefetchMap); err != nil {
             return ""
         }
@@ -170,14 +174,12 @@ func (s *Store) GetPrefetchResult(group, config string, target string, weightTyp
             }
         }
         
-        globalCacheLock.Lock()
-        dataCache.Set(cacheKey, prefetchMap)
-        globalCacheLock.Unlock()
+        SetCacheValue(cacheKey, prefetchMap)
         
         return proxyName
     }
 
-    return proxyName
+    return ""
 }
 
 // 预加载所有预计算结果
@@ -426,34 +428,32 @@ func (s *Store) AdjustCacheParameters() {
         lru.WithSize[string, *StatsRecord](newCacheSize),
         lru.WithAge[string, *StatsRecord](cacheMaxAge),
     )
+
+    var entries map[string]interface{}
+    var preserveRatio float64
     
     if dataCache != nil {
-        globalCacheLock.RLock()
-        
-        var entries map[string]interface{}
-        var preserveRatio float64
-        
         switch {
         case memoryUsage > 0.9: 
             preserveRatio = 0.2
-            entries = dataCache.FilterByKeyPrefix(KeyTypeNode + ":")
-            for k, _ := range dataCache.FilterByKeyPrefix(KeyTypePrefetch + ":") {
-                if val, expires, exists := dataCache.GetWithExpire(k); exists && expires.After(time.Now()) {
-                    entries[k] = val
-                }
+            entries = GetCacheValuesByPrefix(KeyTypeNode + ":")
+            prefetchEntries := GetCacheValuesByPrefix(KeyTypePrefetch + ":")
+            for k, v := range prefetchEntries {
+                entries[k] = v
             }
         case memoryUsage > 0.8:
             preserveRatio = 0.4
-            entries = dataCache.FilterByKeyPrefix(KeyTypeNode + ":")
-            for k, v := range dataCache.FilterByKeyPrefix(KeyTypePrefetch + ":") {
+            entries = GetCacheValuesByPrefix(KeyTypeNode + ":")
+            prefetchEntries := GetCacheValuesByPrefix(KeyTypePrefetch + ":")
+            for k, v := range prefetchEntries {
                 entries[k] = v
             }
         case memoryUsage > 0.7:
             preserveRatio = 0.6
-            entries = dataCache.FilterByKeyPrefix("")
+            entries = GetCacheValuesByPrefix("")
         default:
             preserveRatio = 0.8
-            entries = dataCache.FilterByKeyPrefix("")
+            entries = GetCacheValuesByPrefix("")
         }
         
         dataCount := 0
@@ -479,8 +479,6 @@ func (s *Store) AdjustCacheParameters() {
                 dataCount++
             }
         }
-        
-        globalCacheLock.RUnlock()
         
         log.Infoln("[SmartStore] Cache adjusted: preserved %d/%d items (%.1f%%) under memory pressure %.1f%%", 
                    dataCount, len(entries), float64(dataCount)/float64(len(entries))*100, memoryUsagePercent)
@@ -551,8 +549,14 @@ func (s *Store) PreloadFrequentData(group, config string, proxies []string) {
 func ClearCacheByLevel(level string, config string, group string) {
     if level == "all" {
         RemoveCacheValuesByPrefix("")
-        StatsCache.Clear()
-        domainValidityCache.Clear()
+        globalCacheLock.Lock()
+        if StatsCache != nil {
+            StatsCache.Clear()
+        }
+        if domainValidityCache != nil {
+            domainValidityCache.Clear()
+        }
+        globalCacheLock.Unlock()
     } else if level == "config" {
         RemoveCacheValuesByPrefix(FormatCacheKey(KeyTypeUnwrap, config, "", ""))
         RemoveCacheValuesByPrefix(FormatCacheKey(KeyTypeFailed, config, "", ""))
@@ -561,7 +565,11 @@ func ClearCacheByLevel(level string, config string, group string) {
         RemoveCacheValuesByPrefix(FormatCacheKey(KeyTypeRanking, config, "", ""))
         RemoveCacheValuesByPrefix(FormatCacheKey(KeyTypePrefetch, config, "", ""))
         
-        StatsCache.RemoveByKeyPrefix(":" + config + ":")
+        globalCacheLock.Lock()
+        if StatsCache != nil {
+            StatsCache.RemoveByKeyPrefix(":" + config + ":")
+        }
+        globalCacheLock.Unlock()
     } else if level == "group" {
         RemoveCacheValuesByPrefix(FormatCacheKey(KeyTypeUnwrap, config, group, ""))
         RemoveCacheValuesByPrefix(FormatCacheKey(KeyTypeFailed, config, group, ""))
@@ -570,12 +578,20 @@ func ClearCacheByLevel(level string, config string, group string) {
         RemoveCacheValuesByPrefix(FormatCacheKey(KeyTypeRanking, config, group, ""))
         RemoveCacheValuesByPrefix(FormatCacheKey(KeyTypePrefetch, config, group, ""))
         
-        StatsCache.RemoveByKeyPrefix(":" + config + ":" + group + ":")
+        globalCacheLock.Lock()
+        if StatsCache != nil {
+            StatsCache.RemoveByKeyPrefix(":" + config + ":" + group + ":")
+        }
+        globalCacheLock.Unlock()
     }
 }
 
 // 从数据库结果更新缓存
 func UpdateCacheFromDBResult(fullPath string, data []byte) {
+    if data == nil || len(data) == 0 || fullPath == "" {
+        return
+    }
+
     pathParts := strings.Split(fullPath, "/")
     if len(pathParts) >= 3 && pathParts[0] == "smart" {
         keyType := pathParts[1]
@@ -598,41 +614,44 @@ func UpdateCacheFromDBResult(fullPath string, data []byte) {
         if cacheKey != "" {
             var cacheValue interface{}
             
-            if keyType == KeyTypeStats {
+            switch keyType {
+            case KeyTypeStats:
                 var record StatsRecord
                 if json.Unmarshal(data, &record) == nil {
                     cacheValue = record
                 } else {
+                    log.Debugln("[SmartStore] Failed to unmarshal stats record for key %s", cacheKey)
                     cacheValue = data
                 }
-            } else if keyType == KeyTypeNode {
+            case KeyTypeNode:
                 var state NodeState
                 if json.Unmarshal(data, &state) == nil {
                     cacheValue = state
                 } else {
+                    log.Debugln("[SmartStore] Failed to unmarshal node state for key %s", cacheKey)
                     cacheValue = data
                 }
-            } else if keyType == KeyTypePrefetch {
+            case KeyTypePrefetch:
                 var prefetchMap map[string]string
                 if json.Unmarshal(data, &prefetchMap) == nil {
                     cacheValue = prefetchMap
                 } else {
+                    log.Debugln("[SmartStore] Failed to unmarshal prefetch map for key %s", cacheKey)
                     cacheValue = data
                 }
-            } else if keyType == KeyTypeRanking {
+            case KeyTypeRanking:
                 var rankingData RankingData
                 if json.Unmarshal(data, &rankingData) == nil {
                     cacheValue = rankingData
                 } else {
+                    log.Debugln("[SmartStore] Failed to unmarshal ranking data for key %s", cacheKey)
                     cacheValue = data
                 }
-            } else {
+            default:
                 cacheValue = data
             }
             
-            globalCacheLock.Lock()
-            dataCache.Set(cacheKey, cacheValue)
-            globalCacheLock.Unlock()
+            SetCacheValue(cacheKey, cacheValue)
         }
     }
 }

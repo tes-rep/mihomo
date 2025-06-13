@@ -222,11 +222,9 @@ func (s *Store) BatchSave(operations []StoreOperation) error {
     }
     
     if len(cacheUpdates) > 0 {
-        globalCacheLock.Lock()
         for key, value := range cacheUpdates {
-            dataCache.Set(key, value)
+            SetCacheValue(key, value)
         }
-        globalCacheLock.Unlock()
     }
     
     if err != nil {
@@ -434,11 +432,9 @@ func (s *Store) BatchSaveConnStats(operations []StoreOperation) error {
     })
     
     if len(cacheUpdates) > 0 {
-        globalCacheLock.Lock()
         for key, value := range cacheUpdates {
-            dataCache.Set(key, value)
+            SetCacheValue(key, value)
         }
-        globalCacheLock.Unlock()
     }
     
     if needFlush {
@@ -578,10 +574,7 @@ func (s *Store) GetSubBytesByPath(prefix string, all bool) (map[string][]byte, e
         
         cachePrefix = FormatCacheKey(keyType, config, group)
         
-        globalCacheLock.RLock()
-        cacheResults := dataCache.FilterByKeyPrefix(cachePrefix)
-        globalCacheLock.RUnlock()
-
+        cacheResults := GetCacheValuesByPrefix(cachePrefix)
         
         if len(cacheResults) > int(float64(maxDomainsLimit) * 0.6) && rand.Float64() > 0.15 {
             recordCount := 0

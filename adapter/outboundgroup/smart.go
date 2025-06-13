@@ -965,7 +965,7 @@ func (s *Smart) checkAndLimitStats(record *smart.AtomicStatsRecord) {
 
 // 记录保存
 func (s *Smart) saveStatsRecord(cacheKey, domain string, proxy C.Proxy, record *smart.StatsRecord) {
-    smart.StatsCache.Set(cacheKey, record)
+    smart.SetCacheValue(cacheKey, record)
     
     go func() {
         if data, err := json.Marshal(record); err == nil {
@@ -1174,7 +1174,14 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
     defer lock.Unlock()
     
     atomicManager := smart.GetAtomicManager()
+    if atomicManager == nil {
+        return
+    }
+    
     atomicRecord := atomicManager.GetOrCreateAtomicRecord(cacheKey, s.store, s.Name(), s.configName, domain, proxy.Name())
+    if atomicRecord == nil {
+        return
+    }
     
     var baseWeight, calculatedWeight, oldWeight float64
     var needCheckQuality bool
