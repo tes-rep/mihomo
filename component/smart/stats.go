@@ -339,31 +339,27 @@ func (r *AtomicStatsRecord) SetWeight(weightType string, value float64) {
 
 // 获取节点权重排名
 func (s *Store) GetNodeWeightRanking(group, config string, onlyCache bool, proxies []string) (map[string]string, error) {
-    cacheKey := FormatCacheKey(KeyTypeRanking, config, group, "")
-    
-    cachedData, ok := GetCacheValue(cacheKey)
-    
-    if ok {
-        if rankingData, isRanking := cachedData.(RankingData); isRanking && len(rankingData.Ranking) > 0 {
-            return rankingData.Ranking, nil
-        } else if rankingMap, isMap := cachedData.(map[string]string); isMap && len(rankingMap) > 0 {
-            return rankingMap, nil
-        }
-    }
-    
-    dbKey := FormatDBKey("smart", KeyTypeRanking, config, group, "")
-    var data []byte
-    
-    data, err := s.DBViewGetItem(dbKey)
-    if err == nil && data != nil {
-        var rankingData RankingData
-        if json.Unmarshal(data, &rankingData) == nil && len(rankingData.Ranking) > 0 {
-            SetCacheValue(cacheKey, rankingData)
-            return rankingData.Ranking, nil
-        }
-    }
-
     if onlyCache {
+        cacheKey := FormatCacheKey(KeyTypeRanking, config, group, "")
+        cachedData, ok := GetCacheValue(cacheKey)
+        if ok {
+            if rankingData, isRanking := cachedData.(RankingData); isRanking && len(rankingData.Ranking) > 0 {
+                return rankingData.Ranking, nil
+            } else if rankingMap, isMap := cachedData.(map[string]string); isMap && len(rankingMap) > 0 {
+                return rankingMap, nil
+            }
+        }
+        
+        dbKey := FormatDBKey("smart", KeyTypeRanking, config, group, "")
+        data, err := s.DBViewGetItem(dbKey)
+        if err == nil && data != nil {
+            var rankingData RankingData
+            if json.Unmarshal(data, &rankingData) == nil && len(rankingData.Ranking) > 0 {
+                SetCacheValue(cacheKey, rankingData)
+                return rankingData.Ranking, nil
+            }
+        }
+        
         return make(map[string]string), nil
     }
     
@@ -1631,7 +1627,7 @@ func (s *Store) GetAllGroupsForConfig(config string) ([]string, error) {
     return result, nil
 }
 
-// 获取组中的所有节点
+// 通过缓存数据获取组中的节点
 func (s *Store) GetAllNodesForGroup(group, config string) ([]string, error) {
     nodesMap := make(map[string]bool)
     nodesPath := FormatDBKey("smart", KeyTypeNode, config, group, "")

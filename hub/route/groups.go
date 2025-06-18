@@ -147,7 +147,7 @@ func getGroupWeights(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	weights, err := smartStore.GetStore().GetNodeWeightRanking(groupName, configName, false, proxyNames)
+	weights, err := smartStore.GetStore().GetNodeWeightRanking(groupName, configName, true, proxyNames)
 
 	if err != nil {
 		log.Warnln("[Smart] Failed to get weight ranking: %s", err.Error())
