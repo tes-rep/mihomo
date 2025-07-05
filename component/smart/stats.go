@@ -433,7 +433,7 @@ func (s *Store) GetNodeWeightRanking(group, config string, onlyCache bool, proxi
     minDecay := math.Max(0.1, 0.4 - float64(totalNodes)*0.005)
     
     getTimeDecay := func(lastUsedTime int64) float64 {
-        return getTimeDecayWithCache(lastUsedTime, now, minDecay, decayCache)
+        return GetTimeDecayWithCache(lastUsedTime, now, minDecay, decayCache)
     }
     
     allStats, err := s.GetAllStats(group, config, true)
@@ -636,7 +636,7 @@ func (s *Store) GetBestProxyForTarget(group, config string, target string, weigh
     decayCache := make(map[int64]float64, 72)
     
     getTimeDecay := func(lastUsedTime int64) float64 {
-        return getTimeDecayWithCache(lastUsedTime, now, minDecay, decayCache)
+        return GetTimeDecayWithCache(lastUsedTime, now, minDecay, decayCache)
     }
 
     if strings.HasPrefix(weightType, WeightTypeTCPASN) || strings.HasPrefix(weightType, WeightTypeUDPASN) {

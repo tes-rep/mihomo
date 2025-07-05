@@ -240,7 +240,7 @@ func ClampValue(value, min, max int) int {
 }
 
 // 时间衰减
-func getTimeDecayWithCache(lastUsedTime int64, now int64, minDecay float64, decayCache map[int64]float64) float64 {
+func GetTimeDecayWithCache(lastUsedTime int64, now int64, minDecay float64, decayCache map[int64]float64) float64 {
     fuzzyLastUsedTime := (lastUsedTime / 3600) * 3600
     
     if decay, ok := decayCache[fuzzyLastUsedTime]; ok {
