@@ -31,13 +31,8 @@ func CalculateWeight(success, failure, connectTime, latency int64, isUDP bool, u
     // 4. 计算时间衰减因子
     timeFactor := 1.0
     if lastConnectTimestamp > 0 {
-        hoursSince := float64(time.Now().Unix() - lastConnectTimestamp) / 3600.0
-        if hoursSince <= 72 {
-            timeFactor = 1.0 - (hoursSince * params.timeDecayRate)
-        } else {
-            timeFactor = math.Max(0.2, 1.0 - (72.0 * params.timeDecayRate) - 
-                        (hoursSince - 72) * params.timeDecayRate * 1.5 / 48)
-        }
+        simpleCache := make(map[int64]float64, 1)
+        timeFactor = GetTimeDecayWithCache(lastConnectTimestamp, time.Now().Unix(), params.minDecayFactor, simpleCache)
     }
     
     // 5. 对所有历史数据应用时间衰减

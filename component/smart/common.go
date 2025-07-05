@@ -106,11 +106,11 @@ var (
 
     StatsCache *lru.LruCache[string, *StatsRecord]
 
-    presetSceneParams = map[string]SceneParams{
-        "interactive": {0.4, 0.2, 0.4, 1.2, 1.0, 1.3, 0.005},
-        "streaming":   {0.5, 0.1, 0.4, 1.5, 0.8, 1.2, 0.008},
-        "transfer":    {0.6, 0.2, 0.2, 1.8, 0.7, 0.9, 0.01},
-        "web":         {0.5, 0.3, 0.2, 0.8, 0.6, 1.0, 0.012},
+    var presetSceneParams = map[string]SceneParams{
+        "interactive": {0.4, 0.2, 0.4, 1.2, 1.0, 1.3, 0.3},
+        "streaming":   {0.5, 0.1, 0.4, 1.5, 0.8, 1.2, 0.2},
+        "transfer":    {0.6, 0.2, 0.2, 1.8, 0.7, 0.9, 0.1},
+        "web":         {0.5, 0.3, 0.2, 0.8, 0.6, 1.0, 0.2},
     }
 )
 
@@ -164,7 +164,7 @@ type (
         trafficWeight      float64
         durationWeight     float64
         qualityWeight      float64
-        timeDecayRate      float64
+        minDecayFactor     float64
     }
 )
 
@@ -237,6 +237,39 @@ func ClampValue(value, min, max int) int {
         return max
     }
     return value
+}
+
+// 时间衰减
+func getTimeDecayWithCache(lastUsedTime int64, now int64, minDecay float64, decayCache map[int64]float64) float64 {
+    fuzzyLastUsedTime := (lastUsedTime / 3600) * 3600
+    
+    if decay, ok := decayCache[fuzzyLastUsedTime]; ok {
+        return decay
+    }
+    
+    hoursSinceLastConn := float64(now - fuzzyLastUsedTime) / 3600.0
+    var decay float64
+    
+    switch {
+    case hoursSinceLastConn <= 24:
+        // 0-24小时：保持高权重
+        decay = 1.0
+    case hoursSinceLastConn <= 72:
+        // 24-72小时：线性衰减到0.8
+        decay = 1.0 - (hoursSinceLastConn - 24.0) / 48.0 * 0.2
+    case hoursSinceLastConn <= 168: // 7天
+        // 72-168小时：线性衰减到0.5
+        decay = 0.8 - (hoursSinceLastConn - 72.0) / 96.0 * 0.3
+    case hoursSinceLastConn <= 720: // 30天
+        // 168-720小时：线性衰减到0.3
+        decay = 0.5 - (hoursSinceLastConn - 168.0) / 552.0 * 0.2
+    default:
+        decay = 0.3
+    }
+    
+    decay = math.Max(minDecay, decay)
+    decayCache[fuzzyLastUsedTime] = decay
+    return decay
 }
 
 // 根据系统内存计算限制

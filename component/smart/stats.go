@@ -427,39 +427,13 @@ func (s *Store) GetNodeWeightRanking(group, config string, onlyCache bool, proxi
     }
     
     now := time.Now().Unix()
-    decayCache := make(map[int64]float64, 24)
+    decayCache := make(map[int64]float64, 72)
     
     totalNodes := len(allNodes)
     minDecay := math.Max(0.1, 0.4 - float64(totalNodes)*0.005)
     
     getTimeDecay := func(lastUsedTime int64) float64 {
-        if decay, ok := decayCache[lastUsedTime]; ok {
-            return decay
-        }
-        
-        hoursSinceLastConn := float64(now - lastUsedTime) / 3600.0
-        var decay float64
-        
-        switch {
-        case hoursSinceLastConn <= 72:
-            // 0-72小时内线性衰减到1.0
-            decay = 1.0 - (hoursSinceLastConn / 72.0) * 0.3
-        case hoursSinceLastConn <= 120: 
-            // 72-120小时内线性衰减到0.8
-            decay = 0.7 - (hoursSinceLastConn - 72.0) * 0.2 / 48.0
-        case hoursSinceLastConn <= 192:
-            // 120-192小时内线性衰减到0.5
-            decay = 0.5 - (hoursSinceLastConn - 120.0) * 0.2 / 72.0
-        case hoursSinceLastConn <= 360:
-            // 192-360小时内线性衰减到0.3
-            decay = 0.3 - (hoursSinceLastConn - 192.0) * 0.1 / 168.0
-        default:
-            decay = 0.3
-        }
-        
-        decay = math.Max(minDecay, decay)
-        decayCache[lastUsedTime] = decay
-        return decay
+        return getTimeDecayWithCache(lastUsedTime, now, minDecay, decayCache)
     }
     
     allStats, err := s.GetAllStats(group, config, true)
@@ -657,6 +631,14 @@ func (s *Store) GetBestProxyForTarget(group, config string, target string, weigh
         return "", 0, nil, errors.New("empty target")
     }
 
+    now := time.Now().Unix()
+    minDecay := math.Max(0.1, 0.4)
+    decayCache := make(map[int64]float64, 72)
+    
+    getTimeDecay := func(lastUsedTime int64) float64 {
+        return getTimeDecayWithCache(lastUsedTime, now, minDecay, decayCache)
+    }
+
     if strings.HasPrefix(weightType, WeightTypeTCPASN) || strings.HasPrefix(weightType, WeightTypeUDPASN) {
         nodeStatesMap := make(map[string]NodeState)
         allAvailableNodes := make([]string, 0)
@@ -698,9 +680,12 @@ func (s *Store) GetBestProxyForTarget(group, config string, target string, weigh
                     continue
                 }
 
+                timeDecay := getTimeDecay(record.LastUsed.Unix())
+
                 if record.Weights != nil {
                     if weight, ok := record.Weights[weightType]; ok && weight > 0 {
-                        asnNodeScores[nodeName] += weight
+                        decayedWeight := weight * timeDecay
+                        asnNodeScores[nodeName] += decayedWeight
                         asnNodeSamples[nodeName]++
                     }
                 }
@@ -788,7 +773,6 @@ func (s *Store) GetBestProxyForTarget(group, config string, target string, weigh
         for nodeName, data := range stateData {
             var state NodeState
             if err := json.Unmarshal(data, &state); err == nil {
-                // 检查节点是否在屏蔽期
                 if !state.BlockedUntil.IsZero() && state.BlockedUntil.After(time.Now()) {
                     continue
                 }
@@ -799,7 +783,6 @@ func (s *Store) GetBestProxyForTarget(group, config string, target string, weigh
         
         availableNodesCount := len(allAvailableNodes)
         
-        // 处理有权重的节点
         nodesWithWeight := make(map[string]float64, len(stats))
         for nodeName, data := range stats {
             var record StatsRecord
@@ -813,12 +796,14 @@ func (s *Store) GetBestProxyForTarget(group, config string, target string, weigh
             }
             
             if weight > 0 {
-                // 检查节点是否被降级
+                timeDecay := getTimeDecay(record.LastUsed.Unix())
+                decayedWeight := weight * timeDecay
+                
                 if state, exists := nodeStatesMap[nodeName]; exists && state.Degraded {
-                    weight *= state.DegradedFactor
+                    decayedWeight *= state.DegradedFactor
                 }
                 
-                nodesWithWeight[nodeName] = weight
+                nodesWithWeight[nodeName] = decayedWeight
             }
         }
         
