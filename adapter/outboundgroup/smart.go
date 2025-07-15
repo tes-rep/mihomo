@@ -376,14 +376,17 @@ func (s *Smart) InitializeCache() {
 
     smartInitOnce.Do(func() {
         s.startTimedTask(5*time.Minute, checkInterval, "Clean up groups", s.cleanupOrphanedGroups, true)
-        s.startTimedTask(5*time.Second, cacheParamAdjustInterval, "Cache parameter adjustment", s.store.AdjustCacheParameters, false)
+        s.startTimedTask(5*time.Minute, cacheParamAdjustInterval, "Cache parameter adjustment", s.store.AdjustCacheParameters, false)
         s.startTimedTask(5*time.Minute, flushQueueInterval, "Queue flush", func() {
             s.store.FlushQueue(false)
         }, false)
     })
 
     s.startTimedTask(5*time.Minute, checkInterval, "Clean up nodes", s.cleanupOrphanedNodeCache, true)
-    s.startTimedTask(10*time.Second, checkInterval, "Preload frequent data", func() {
+    s.startTimedTask(5*time.Second, checkInterval, "Preload frequent data", func() {
+        smartInitOnce.Do(func() {
+            s.store.AdjustCacheParameters()
+        })
         proxies := s.GetProxies(false)
         proxyNames := make([]string, 0, len(proxies))
         for _, p := range proxies {
@@ -392,7 +395,7 @@ func (s *Smart) InitializeCache() {
         s.store.PreloadFrequentData(s.Name(), s.configName, proxyNames)
     }, true)
     s.startTimedTask(5*time.Minute, prefetchInterval, "prefetch", s.runPrefetch, false)
-    s.startTimedTask(5*time.Minute, rankingInterval, "ranking", s.updateNodeRanking, false)
+    s.startTimedTask(30*time.Second, rankingInterval, "ranking", s.updateNodeRanking, false)
     s.startTimedTask(5*time.Minute, recoveryCheckInterval, "Recovery check", s.checkAndRecoverDegradedNodes, false)
     s.startTimedTask(10*time.Minute, checkInterval, "long connection processing", func() {
         s.processLongConnections(longConnThreshold)
@@ -677,7 +680,7 @@ func (s *Smart) selectProxy(metadata *C.Metadata, touch bool) C.Proxy {
         }
         
         // 检查预解析缓存
-        if cachedProxyName := s.store.GetPrefetchResult(s.Name(), s.configName, target, weightType); cachedProxyName != "" {
+        if cachedProxyName, _ := s.store.GetPrefetchResult(s.Name(), s.configName, target, weightType); cachedProxyName != "" {
             if proxy := findProxyByName(cachedProxyName); proxy != nil {
                 return proxy
             }
@@ -1445,12 +1448,11 @@ func (s *Smart) cleanupDegradedNodePreferenceCache(domain string, nodeName strin
     // 处理域名相关缓存
     bestNode, bestWeight, _, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, domain, weightType, false)
     if err == nil && bestNode != "" && bestNode != nodeName && bestWeight > currentWeight {
-        s.store.StorePrefetchResult(s.Name(), s.configName, domain, weightType, bestNode)
+        s.store.StorePrefetchResult(s.Name(), s.configName, domain, weightType, bestNode, bestWeight)
         log.Debugln("[Smart] Added new prefetch result for domain: [%s] -> [%s] (weight: %.4f, type: %s)", 
             domain, bestNode, bestWeight, weightType)
     }
 
-    
     // 处理ASN相关缓存
     if asnInfo != "" {
         asnWeightType := smart.WeightTypeTCPASN
@@ -1459,11 +1461,11 @@ func (s *Smart) cleanupDegradedNodePreferenceCache(domain string, nodeName strin
         }
         fullAsnWeightType := asnWeightType + ":" + asnInfo
 
-        s.store.DeleteCacheResult(smart.KeyTypePrefetch, s.Name(), s.configName, fullAsnWeightType)
-        
+        s.store.DeleteCacheResult(smart.KeyTypePrefetch, s.Name(), s.configName, asnInfo)
+
         bestNode, bestWeight, _, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, asnInfo, fullAsnWeightType, false)
         if err == nil && bestNode != "" && bestNode != nodeName && bestWeight > 0 {
-            s.store.StorePrefetchResult(s.Name(), s.configName, asnInfo, fullAsnWeightType, bestNode)
+            s.store.StorePrefetchResult(s.Name(), s.configName, asnInfo, fullAsnWeightType, bestNode, bestWeight)
             log.Debugln("[Smart] Added new ASN prefetch result: [%s] -> [%s] (weight: %.4f, type: %s)", 
                 asnInfo, bestNode, bestWeight, fullAsnWeightType)
         }

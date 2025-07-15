@@ -8,10 +8,10 @@ import (
     "time"
     "errors"
     "fmt"
-    "math/rand"
     "hash/fnv"
     "sync"
     "sync/atomic"
+    "container/heap"
 
     "github.com/metacubex/mihomo/log"
 )
@@ -38,6 +38,22 @@ type AtomicStatsRecord struct {
 type AtomicRecordManager struct {
     records sync.Map
 }
+
+type domainLastUsed struct {
+    domain   string
+    lastUsed time.Time
+    types    []string
+}
+
+type domainMinHeap []domainLastUsed
+
+type asnLastUsed struct {
+    asn      string
+    lastUsed time.Time
+    types    []string
+}
+
+type asnMinHeap []asnLastUsed
 
 var (
     globalAtomicManager *AtomicRecordManager
@@ -664,12 +680,7 @@ func (s *Store) GetBestProxyForTarget(group, config string, target string, weigh
     if stats, ok := allStatsMap[target]; ok {
         domainStats = stats
     } else {
-        if len(allAvailableNodes) == 0 {
-            return "", 0, nil, errors.New("no available nodes")
-        }
-        randomIndex := int(time.Now().UnixNano() % int64(len(allAvailableNodes)))
-        randomNode := allAvailableNodes[randomIndex]
-        return randomNode, 0.0, nodesWithWeight, nil
+        return "", 0, nodesWithWeight, nil
     }
 
     asnMode := strings.HasPrefix(weightType, WeightTypeTCPASN) || strings.HasPrefix(weightType, WeightTypeUDPASN)
@@ -840,141 +851,103 @@ func (s *Store) GetBestProxyForTarget(group, config string, target string, weigh
         }
         return bestNode, bestWeight, nodesWithWeight, nil
     } else {
-        if len(allAvailableNodes) == 0 {
-            return "", 0, nil, errors.New("no available nodes")
-        }
-        randomIndex := int(time.Now().UnixNano() % int64(len(allAvailableNodes)))
-        randomNode := allAvailableNodes[randomIndex]
-        return randomNode, 0.0, nodesWithWeight, nil
+        return "", 0, nodesWithWeight, nil
     }
 }
 
 // 获取活跃域名
-func (s *Store) GetActiveDomains(group, config string, limit int) ([]string, error) {
-    allStats, err := s.GetAllStats(group, config, false)
+func (h domainMinHeap) Len() int           { return len(h) }
+func (h domainMinHeap) Less(i, j int) bool { return h[i].lastUsed.Before(h[j].lastUsed) }
+func (h domainMinHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *domainMinHeap) Push(x interface{}) { *h = append(*h, x.(domainLastUsed)) }
+func (h *domainMinHeap) Pop() interface{} {
+    old := *h
+    n := len(old)
+    x := old[n-1]
+    *h = old[0 : n-1]
+    return x
+}
+
+func (s *Store) GetActiveDomains(group, config string, limit int, all bool) (map[string][]string, error) {
+    allStats, err := s.GetAllStats(group, config, all)
     if err != nil {
         return nil, err
     }
-
     if len(allStats) == 0 {
         return nil, nil
     }
 
-    type domainActivity struct {
-        domain     string
-        lastUsed   time.Time
-        totalHits  int64
-        sampleSize int
-        avgWeight  float64
-        score      float64
-    }
-
-    var domains []domainActivity
+    h := &domainMinHeap{}
+    heap.Init(h)
 
     for domain, nodeStats := range allStats {
-        var lastUsed time.Time
-        var totalSuccess, totalFailure int64
-        var totalWeight float64
-        validSamples := 0
-        var timeDecayedSamples float64 = 0
-
+        var maxLastUsed time.Time
+        activeTypeSet := make(map[string]struct{})
         for _, data := range nodeStats {
             var record StatsRecord
             if json.Unmarshal(data, &record) != nil {
                 continue
             }
-
-            if lastUsed.IsZero() || record.LastUsed.After(lastUsed) {
-                lastUsed = record.LastUsed
+            if maxLastUsed.IsZero() || record.LastUsed.After(maxLastUsed) {
+                maxLastUsed = record.LastUsed
             }
-
-            now := time.Now().Unix()
-            hoursSinceLastConn := float64(now-record.LastUsed.Unix()) / 3600.0
-
-            timeDecay := math.Exp(-hoursSinceLastConn / 24.0)
-
-            // 防止太久远的连接完全被忽略
-            timeDecay = math.Max(0.3, timeDecay)
-
-            decayedSuccess := float64(record.Success) * timeDecay
-            decayedFailure := float64(record.Failure) * timeDecay
-
-            totalSuccess += int64(decayedSuccess)
-            totalFailure += int64(decayedFailure)
-
-            var weight float64
             if record.Weights != nil {
-                if w, ok := record.Weights[WeightTypeTCP]; ok {
-                    weight += w
+                if w, ok := record.Weights[WeightTypeTCP]; ok && w > 0 {
+                    activeTypeSet[WeightTypeTCP] = struct{}{}
                 }
-                if w, ok := record.Weights[WeightTypeUDP]; ok {
-                    weight += w
+                if w, ok := record.Weights[WeightTypeUDP]; ok && w > 0 {
+                    activeTypeSet[WeightTypeUDP] = struct{}{}
                 }
             }
-
-            if weight <= 0 && record.Success+record.Failure >= DefaultMinSampleCount {
-                weight = CalculateWeight(
-                    record.Success, record.Failure, 
-                    record.ConnectTime, record.Latency,
-                    false,
-                    record.UploadTotal,
-                    record.DownloadTotal,
-                    record.ConnectionDuration,
-                    record.LastUsed.Unix(),
-                )
-            }
-
-            decayedWeight := weight * timeDecay
-            totalWeight += decayedWeight
-            timeDecayedSamples += float64(record.Success+record.Failure) * timeDecay
-            validSamples++
         }
-
-        if validSamples > 0 {
-            avgWeight := totalWeight / float64(validSamples)
-            domains = append(domains, domainActivity{
-                domain:     domain,
-                lastUsed:   lastUsed,
-                totalHits:  totalSuccess + totalFailure,
-                sampleSize: int(timeDecayedSamples),
-                avgWeight:  avgWeight,
-            })
+        if maxLastUsed.IsZero() || len(activeTypeSet) == 0 {
+            continue
+        }
+        types := make([]string, 0, len(activeTypeSet))
+        for t := range activeTypeSet {
+            types = append(types, t)
+        }
+        heap.Push(h, domainLastUsed{
+            domain:   domain,
+            lastUsed: maxLastUsed,
+            types:    types,
+        })
+        if h.Len() > limit {
+            heap.Pop(h)
         }
     }
 
-    if len(domains) == 0 {
-        return nil, nil
+    result := make(map[string][]string)
+    var sorted []domainLastUsed
+    for h.Len() > 0 {
+        sorted = append(sorted, heap.Pop(h).(domainLastUsed))
     }
-
-    now := time.Now()
-    for i := range domains {
-        timeDiff := now.Sub(domains[i].lastUsed)
-        timeScore := 1.0 / (1.0 + float64(timeDiff.Hours())/24.0)
-        sampleScore := float64(domains[i].totalHits) * domains[i].avgWeight
-        domains[i].score = timeScore*0.8 + (sampleScore * 0.2)
-    }
-
-    sort.Slice(domains, func(i, j int) bool {
-        return domains[i].score > domains[j].score
-    })
-
-    if len(domains) > limit {
-        domains = domains[:limit]
-    }
-
-    result := make([]string, len(domains))
-    for i, d := range domains {
-        result[i] = d.domain
+    for i := len(sorted) - 1; i >= 0; i-- {
+        result[sorted[i].domain] = sorted[i].types
     }
     return result, nil
 }
 
-// 获取活跃的ASN
-func (s *Store) GetActiveASNs(group, config string, limit int) []string {
-    asnFrequency := make(map[string]int)
-    asnLastUsed := make(map[string]time.Time)
 
-    allStats, err := s.GetAllStats(group, config, false)
+// 获取活跃的ASN
+func (h asnMinHeap) Len() int           { return len(h) }
+func (h asnMinHeap) Less(i, j int) bool { return h[i].lastUsed.Before(h[j].lastUsed) }
+func (h asnMinHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *asnMinHeap) Push(x interface{}) { *h = append(*h, x.(asnLastUsed)) }
+func (h *asnMinHeap) Pop() interface{} {
+    old := *h
+    n := len(old)
+    x := old[n-1]
+    *h = old[0 : n-1]
+    return x
+}
+
+func (s *Store) GetActiveASNs(group, config string, limit int, all bool) map[string][]string {
+    asnLastUsedMap := make(map[string]time.Time)
+    asnTypeSet := make(map[string]map[string]struct{})
+    asnFrequency := make(map[string]int)
+
+    allStats, err := s.GetAllStats(group, config, all)
     if err != nil {
         return nil
     }
@@ -985,16 +958,23 @@ func (s *Store) GetActiveASNs(group, config string, limit int) []string {
             if json.Unmarshal(data, &record) != nil {
                 continue
             }
-
             for weightType := range record.Weights {
                 if strings.HasPrefix(weightType, WeightTypeTCPASN) || strings.HasPrefix(weightType, WeightTypeUDPASN) {
                     parts := strings.Split(weightType, ":")
                     if len(parts) >= 2 {
                         asn := parts[1]
                         asnFrequency[asn]++
-
-                        if lastUsed, exists := asnLastUsed[asn]; !exists || record.LastUsed.After(lastUsed) {
-                            asnLastUsed[asn] = record.LastUsed
+                        if lastUsed, exists := asnLastUsedMap[asn]; !exists || record.LastUsed.After(lastUsed) {
+                            asnLastUsedMap[asn] = record.LastUsed
+                        }
+                        if asnTypeSet[asn] == nil {
+                            asnTypeSet[asn] = make(map[string]struct{})
+                        }
+                        if strings.HasPrefix(weightType, WeightTypeTCPASN) {
+                            asnTypeSet[asn][WeightTypeTCP] = struct{}{}
+                        }
+                        if strings.HasPrefix(weightType, WeightTypeUDPASN) {
+                            asnTypeSet[asn][WeightTypeUDP] = struct{}{}
                         }
                     }
                 }
@@ -1002,47 +982,39 @@ func (s *Store) GetActiveASNs(group, config string, limit int) []string {
         }
     }
 
-    type asnInfo struct {
-        asn       string
-        frequency int
-        lastUsed  time.Time
-    }
-    var asnList []asnInfo
-
-    for asn, freq := range asnFrequency {
-        if freq >= DefaultMinSampleCount {
-            asnList = append(asnList, asnInfo{
-                asn:       asn,
-                frequency: freq,
-                lastUsed:  asnLastUsed[asn],
-            })
+    h := &asnMinHeap{}
+    heap.Init(h)
+    for asn, lastUsed := range asnLastUsedMap {
+        if asnFrequency[asn] < DefaultMinSampleCount {
+            continue
+        }
+        typeSet := asnTypeSet[asn]
+        types := make([]string, 0, len(typeSet))
+        for t := range typeSet {
+            types = append(types, t)
+        }
+        heap.Push(h, asnLastUsed{
+            asn:      asn,
+            lastUsed: lastUsed,
+            types:    types,
+        })
+        if h.Len() > limit {
+            heap.Pop(h)
         }
     }
 
-    // 排序逻辑: 频率相差两倍以上按频率排序，否则按最近使用时间排序
-    sort.Slice(asnList, func(i, j int) bool {
-        if asnList[i].frequency > asnList[j].frequency*2 {
-            return true
-        }
-        if asnList[j].frequency > asnList[i].frequency*2 {
-            return false
-        }
-
-        return asnList[i].lastUsed.After(asnList[j].lastUsed)
-    })
-
-    result := make([]string, 0, limit)
-    for i, info := range asnList {
-        if i >= limit {
-            break
-        }
-        result = append(result, info.asn)
+    result := make(map[string][]string)
+    var sorted []asnLastUsed
+    for h.Len() > 0 {
+        sorted = append(sorted, heap.Pop(h).(asnLastUsed))
     }
-
+    for i := len(sorted) - 1; i >= 0; i-- {
+        result[sorted[i].asn] = sorted[i].types
+    }
     return result
 }
 
-// RunPrefetch 运行预取
+// RunPrefetch 最佳节点预先获取
 func (s *Store) RunPrefetch(group, config string, proxyMap map[string]string) int {
     log.Debugln("[SmartStore] Executing domain and ASN pre-calculation for policy group [%s]", group)
 
@@ -1077,96 +1049,125 @@ func (s *Store) RunPrefetch(group, config string, proxyMap map[string]string) in
         prefetchLimit = MinPrefetchDomainsLimit
     }
 
-    domains, _ := s.GetActiveDomains(group, config, prefetchLimit)
-    asns := s.GetActiveASNs(group, config, prefetchLimit/2)
+    domains, _ := s.GetActiveDomains(group, config, prefetchLimit, true)
+    asns := s.GetActiveASNs(group, config, prefetchLimit/2, true)
 
     prefetchCount := 0
-    algorithmRandomCount := 0
-    weightTypes := []string{WeightTypeTCP, WeightTypeUDP}
-
-    availableNodes := make([]string, 0, len(availableProxyMap))
-    for name := range availableProxyMap {
-        availableNodes = append(availableNodes, name)
-    }
 
     type prefetchItem struct {
         target     string
         weightType string
         bestNode   string
         bestWeight float64
-        isAlgorithmRandom bool
     }
-    
+
     var domainItems []prefetchItem
     var asnItems []prefetchItem
 
-    for _, domain := range domains {
-        for _, weightType := range weightTypes {
+    // 域名
+    for domain, activeTypes := range domains {
+        for _, weightType := range activeTypes {
             bestNode, bestWeight, _, err := s.GetBestProxyForTarget(group, config, domain, weightType, true)
-            if err != nil || bestNode == "" {
+            if err != nil || bestNode == "" || bestWeight <= 0 {
                 continue
             }
-
             if _, exists := availableProxyMap[bestNode]; exists {
                 item := prefetchItem{
-                    target:            domain,
-                    weightType:        weightType,
-                    bestNode:          bestNode,
-                    bestWeight:        bestWeight,
-                    isAlgorithmRandom: bestWeight <= 0,
+                    target:     domain,
+                    weightType: weightType,
+                    bestNode:   bestNode,
+                    bestWeight: bestWeight,
                 }
                 domainItems = append(domainItems, item)
-                
-                if item.isAlgorithmRandom {
-                    algorithmRandomCount++
-                }
             }
         }
     }
 
-    for _, asn := range asns {
-        for _, baseType := range []string{WeightTypeTCPASN, WeightTypeUDPASN} {
-            weightType := baseType + ":" + asn
-            bestNode, bestWeight, _, err := s.GetBestProxyForTarget(group, config, asn, weightType, true)
-            if err != nil || bestNode == "" {
+    // ASN
+    for asn, activeTypes := range asns {
+        for _, baseType := range activeTypes {
+            var weightType string
+            if baseType == WeightTypeTCP {
+                weightType = WeightTypeTCPASN + ":" + asn
+            } else if baseType == WeightTypeUDP {
+                weightType = WeightTypeUDPASN + ":" + asn
+            } else {
                 continue
             }
-
+            bestNode, bestWeight, _, err := s.GetBestProxyForTarget(group, config, asn, weightType, true)
+            if err != nil || bestNode == "" || bestWeight <= 0 {
+                continue
+            }
             if _, exists := availableProxyMap[bestNode]; exists {
                 item := prefetchItem{
-                    target:            asn,
-                    weightType:        weightType,
-                    bestNode:          bestNode,
-                    bestWeight:        bestWeight,
-                    isAlgorithmRandom: bestWeight <= 0,
+                    target:     asn,
+                    weightType: weightType,
+                    bestNode:   bestNode,
+                    bestWeight: bestWeight,
                 }
                 asnItems = append(asnItems, item)
-                
-                if item.isAlgorithmRandom {
-                    algorithmRandomCount++
-                }
             }
         }
     }
 
-    totalItems := len(domainItems) + len(asnItems)
-    algorithmRandomRatio := 0.0
-    if totalItems > 0 {
-        algorithmRandomRatio = float64(algorithmRandomCount) / float64(totalItems)
-    }
-
+    // 域名
     for _, item := range domainItems {
-        s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode)
-        prefetchCount++
+        oldNode, oldWeight := s.GetPrefetchResult(group, config, item.target, item.weightType)
+        if item.bestWeight == 0 {
+            continue
+        }
+        if oldNode == "" {
+            s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
+            prefetchCount++
+            log.Debugln("[SmartStore] Prefetching domain [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (no old result)",
+                item.target, item.bestNode, group, item.weightType, item.bestWeight)
+            continue
+        }
+        if oldNode == item.bestNode {
+            if item.bestWeight != oldWeight && item.bestWeight > 0 {
+                s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
+                prefetchCount++
+                log.Debugln("[SmartStore] Prefetching domain [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (old: %.2f, same node, weight changed)",
+                    item.target, item.bestNode, group, item.weightType, item.bestWeight, oldWeight)
+            }
+        } else if item.bestWeight > oldWeight {
+            s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
+            prefetchCount++
+            log.Debugln("[SmartStore] Prefetching domain [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (old: %.2f, upgraded)",
+                item.target, item.bestNode, group, item.weightType, item.bestWeight, oldWeight)
+        }
     }
 
+    // ASN
     for _, item := range asnItems {
-        s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode)
-        prefetchCount++
+        oldNode, oldWeight := s.GetPrefetchResult(group, config, item.target, item.weightType)
+        if item.bestWeight == 0 {
+            continue
+        }
+        if oldNode == "" {
+            s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
+            prefetchCount++
+            log.Debugln("[SmartStore] Prefetching ASN [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (no old result)",
+                item.target, item.bestNode, group, item.weightType, item.bestWeight)
+            continue
+        }
+        if oldNode == item.bestNode {
+            if item.bestWeight != oldWeight && item.bestWeight > 0 {
+                s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
+                prefetchCount++
+                log.Debugln("[SmartStore] Prefetching ASN [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (old: %.2f, same node, weight changed)",
+                    item.target, item.bestNode, group, item.weightType, item.bestWeight, oldWeight)
+            }
+        } else if item.bestWeight > oldWeight {
+            s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
+            prefetchCount++
+            log.Debugln("[SmartStore] Prefetching ASN [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (old: %.2f, upgraded)",
+                item.target, item.bestNode, group, item.weightType, item.bestWeight, oldWeight)
+        }
     }
 
-    log.Infoln("[SmartStore] Prefetch completed for group [%s]: pre-calculated %d domain/ASN mappings (%d algorithm randoms, ratio: %.1f%%)",
-        group, prefetchCount, algorithmRandomCount, algorithmRandomRatio*100)
+    log.Infoln("[SmartStore] Prefetch completed for group [%s]: pre-calculated %d domain/ASN mappings",
+        group, prefetchCount)
     return prefetchCount
 }
 
@@ -1343,124 +1344,51 @@ func (s *Store) GetStatsForDomain(group, config, domain string) (map[string][]by
 // 获取所有统计数据
 func (s *Store) GetAllStats(group, config string, all bool) (map[string]map[string][]byte, error) {
     cacheKeyPrefix := FormatCacheKey(KeyTypeStats, config, group, "")
-    
     cacheResults := GetCacheValuesByPrefix(cacheKeyPrefix)
 
     globalCacheParams.mutex.RLock()
     configMaxDomains := globalCacheParams.MaxDomains
     globalCacheParams.mutex.RUnlock()
 
-    maxDomainsLimit := 500
+    maxDomainsLimit := 1000
     if all {
         maxDomainsLimit = configMaxDomains
-    } else {
-        if configMaxDomains < 500 {
-            maxDomainsLimit = configMaxDomains
-        }
+    } else if configMaxDomains < 1000 {
+        maxDomainsLimit = configMaxDomains
     }
-    
-    if len(cacheResults) > int(float64(maxDomainsLimit) * 0.6) {
-        result := make(map[string]map[string][]byte)
-        domainsCount := 0
 
-        keys := make([]string, 0, len(cacheResults))
-        for key := range cacheResults {
-            keys = append(keys, key)
-        }
-
-        for _, key := range keys {
-            if domainsCount >= maxDomainsLimit {
-                break
-            }
-            
-            value := cacheResults[key]
-            parts := strings.Split(key, ":")
-            if len(parts) >= 5 {
-                domain := parts[len(parts)-2]
-                nodeName := parts[len(parts)-1]
-                
-                if _, exists := result[domain]; !exists {
-                    result[domain] = make(map[string][]byte)
-                    domainsCount++
-                }
-                
-                var data []byte
-                var err error
-                
-                switch v := value.(type) {
-                case []byte:
-                    data = make([]byte, len(v))
-                    copy(data, v)
-                case StatsRecord:
-                    data, err = json.Marshal(v)
-                default:
-                    continue
-                }
-                
-                if err == nil && data != nil {
-                    result[domain][nodeName] = data
-                }
-            }
-        }
-        
-        globalQueueMutex.Lock()
-        for _, op := range globalOperationQueue {
-            if op.Type == OpSaveStats && op.Group == group && op.Config == config {
-                domain := op.Domain
-                nodeName := op.Node
-                
-                if _, exists := result[domain]; !exists {
-                    if domainsCount >= maxDomainsLimit {
-                        continue
-                    }
-                    result[domain] = make(map[string][]byte)
-                    domainsCount++
-                }
-                
-                result[domain][nodeName] = op.Data
-            }
-        }
-        globalQueueMutex.Unlock()
-        
-        if len(result) > 0 {
-            return result, nil
-        }
-    }
-    
-    pathPrefix := FormatDBKey("smart", KeyTypeStats, config, group, "")
     result := make(map[string]map[string][]byte)
-    
-    skipOffset := 0
-    if maxDomainsLimit > 500 {
-        skipOffset = rand.Intn(maxDomainsLimit / 3)
-    }
+    domainsCount := 0
 
-    rawResult, err := s.DBViewPrefixScan(pathPrefix, skipOffset, maxDomainsLimit)
-    if err != nil {
-        return nil, err
-    }
-    
-    for path, data := range rawResult {
-        parts := strings.Split(path, "/")
-        if len(parts) < 6 {
-            continue
+    for key, value := range cacheResults {
+        if domainsCount >= maxDomainsLimit {
+            break
         }
-
-        domain := parts[len(parts)-2]
-        node := parts[len(parts)-1]
-
-        if _, exists := result[domain]; !exists {
-            result[domain] = make(map[string][]byte)
-        }
-
-        result[domain][node] = data
-        
-        cacheKey := FormatCacheKey(KeyTypeStats, config, group, domain, node)
-        var record StatsRecord
-        if json.Unmarshal(data, &record) == nil {
-            SetCacheValue(cacheKey, record)
-        } else {
-            SetCacheValue(cacheKey, data)
+        parts := strings.Split(key, ":")
+        if len(parts) >= 5 {
+            domain := parts[len(parts)-2]
+            nodeName := parts[len(parts)-1]
+            if _, exists := result[domain]; !exists {
+                if domainsCount >= maxDomainsLimit {
+                    break
+                }
+                result[domain] = make(map[string][]byte)
+                domainsCount++
+            }
+            var data []byte
+            var err error
+            switch v := value.(type) {
+            case []byte:
+                data = make([]byte, len(v))
+                copy(data, v)
+            case StatsRecord:
+                data, err = json.Marshal(v)
+            default:
+                continue
+            }
+            if err == nil && data != nil {
+                result[domain][nodeName] = data
+            }
         }
     }
 
@@ -1469,15 +1397,50 @@ func (s *Store) GetAllStats(group, config string, all bool) (map[string]map[stri
         if op.Type == OpSaveStats && op.Group == group && op.Config == config {
             domain := op.Domain
             nodeName := op.Node
-            
             if _, exists := result[domain]; !exists {
+                if domainsCount >= maxDomainsLimit {
+                    continue
+                }
                 result[domain] = make(map[string][]byte)
+                domainsCount++
             }
-            
             result[domain][nodeName] = op.Data
         }
     }
     globalQueueMutex.Unlock()
+
+    if len(result) < maxDomainsLimit {
+        pathPrefix := FormatDBKey("smart", KeyTypeStats, config, group, "")
+        rawResult, err := s.DBViewPrefixScan(pathPrefix, maxDomainsLimit)
+        if err != nil {
+            return nil, err
+        }
+        for path, data := range rawResult {
+            if len(result) >= maxDomainsLimit {
+                break
+            }
+            parts := strings.Split(path, "/")
+            if len(parts) < 6 {
+                continue
+            }
+            domain := parts[len(parts)-2]
+            node := parts[len(parts)-1]
+            if _, exists := result[domain]; !exists {
+                result[domain] = make(map[string][]byte)
+            }
+            if _, exists := result[domain][node]; !exists {
+                result[domain][node] = data
+                cacheKey := FormatCacheKey(KeyTypeStats, config, group, domain, node)
+                var record StatsRecord
+                if json.Unmarshal(data, &record) == nil {
+                    SetCacheValue(cacheKey, record)
+                } else {
+                    SetCacheValue(cacheKey, data)
+                }
+            }
+        }
+    }
+
     return result, nil
 }
 
@@ -1525,7 +1488,7 @@ func (s *Store) GetAllGroupsForConfig(config string) ([]string, error) {
     statsPath := FormatDBKey("smart", KeyTypeStats, config)
     prefix := statsPath + "/"
     
-    scanResults, err := s.DBViewPrefixScan(prefix, 0, 1000)
+    scanResults, err := s.DBViewPrefixScan(prefix, 1000)
     if err != nil {
         return nil, err
     }
@@ -1638,7 +1601,7 @@ func (s *Store) RemoveNodesData(group, config string, nodes []string) error {
     for _, nodeName := range nodes {
         nodePath := FormatDBKey("smart", KeyTypeNode, config, group, nodeName)
         if err := s.DeleteByPath(nodePath); err != nil {
-            log.Warnln("[SmartStore] Failed to delete node state for %s: %v", nodeName, err)
+            log.Warnln("[SmartStore] Failed to delete node state for [%s]: %v", nodeName, err)
         }
         
         cacheKey := FormatCacheKey(KeyTypeNode, config, group, nodeName)
@@ -1652,7 +1615,7 @@ func (s *Store) RemoveNodesData(group, config string, nodes []string) error {
             
             statsPath := FormatDBKey("smart", KeyTypeStats, config, group, domain, nodeName)
             if err := s.DeleteByPath(statsPath); err != nil {
-                log.Warnln("[SmartStore] Failed to delete stats for %s, domain %s: %v", nodeName, domain, err)
+                log.Warnln("[SmartStore] Failed to delete stats for [%s], domain [%s]: %v", nodeName, domain, err)
             }
         }
     }
@@ -1682,7 +1645,7 @@ func (s *Store) MarkConnectionFailed(group, config, host string) {
         s.networkFailureStatus[groupKey] = true
         s.successCount[groupKey] = 0
         if !wasFailure {
-            log.Warnln("[SmartStore] Network failure detected for group [%s:%s] after %d consecutive failures",
+            log.Warnln("[SmartStore] Network failure detected for group [%s:%s] after [%d] consecutive failures",
                 group, config, failedCount)
             s.lastNetworkFailure[groupKey] = time.Now()
         }
@@ -1774,7 +1737,7 @@ func (s *Store) CleanupOldDomains(group, config string) error {
             // 删除域名统计数据（缓存和DB）
             err := s.DeleteDomainRecords(group, config, info.domain)
             if err != nil {
-                log.Warnln("[SmartStore] Failed to delete domain %s: %v", info.domain, err)
+                log.Warnln("[SmartStore] Failed to delete domain [%s]: %v", info.domain, err)
             }
             // 同时清理预取结果（缓存和DB）
             s.DeleteCacheResult(KeyTypePrefetch, group, config, info.domain)
@@ -1782,7 +1745,7 @@ func (s *Store) CleanupOldDomains(group, config string) error {
             _ = s.DeleteByPath(prefetchDBKey)
         }
 
-        log.Debugln("[SmartStore] Cleaned up %d old domain records, keeping the latest %d (group %s)",
+        log.Debugln("[SmartStore] Cleaned up [%d] old domain records, keeping the latest [%d] (group %s)",
             len(toDelete), maxDomains, group)
     }
 
@@ -1814,13 +1777,13 @@ func (s *Store) CleanupExpiredStats(group, config string) error {
             expiredDomains = append(expiredDomains, domain)
             err := s.DeleteDomainRecords(group, config, domain)
             if err != nil {
-                log.Warnln("[SmartStore] Failed to delete expired domain %s: %v", domain, err)
+                log.Warnln("[SmartStore] Failed to delete expired domain [%s]: %v", domain, err)
             }
         }
     }
 
     if len(expiredDomains) > 0 {
-        log.Debugln("[SmartStore] Deleted %d expired domains for group %s", len(expiredDomains), group)
+        log.Debugln("[SmartStore] Deleted [%d] expired domains for group [%s]", len(expiredDomains), group)
     }
 
     return nil

@@ -635,13 +635,8 @@ func (s *Store) GetSubBytesByPath(prefix string, all bool) (map[string][]byte, e
             }
         }
     }
-
-    skipOffset := 0
-    if maxDomainsLimit > 300 {
-        skipOffset = rand.Intn(maxDomainsLimit / 3)
-    }
     
-    dbResult, err := s.DBViewPrefixScan(prefix, skipOffset, maxDomainsLimit)
+    dbResult, err := s.DBViewPrefixScan(prefix, maxDomainsLimit)
     if err != nil {
         return nil, err
     }
@@ -657,7 +652,7 @@ func (s *Store) GetSubBytesByPath(prefix string, all bool) (map[string][]byte, e
 func (s *Store) DeleteByPath(path string) error {
     keysToDelete := []string{}
 
-    matchingData, err := s.DBViewPrefixScan(path, 0, 10000)
+    matchingData, err := s.DBViewPrefixScan(path, 10000)
     if err != nil {
         return err
     }
@@ -732,40 +727,67 @@ func (s *Store) DBViewPrefixCount(prefix string) (int, error) {
     return count, err
 }
 
-// 扫描前缀匹配的记录并返回结果
-func (s *Store) DBViewPrefixScan(prefix string, skipOffset int, maxResults int) (map[string][]byte, error) {
+// 扫描前缀匹配的记录并随机返回结果
+func (s *Store) DBViewPrefixScan(prefix string, maxResults int) (map[string][]byte, error) {
     result := make(map[string][]byte)
 
-    err := s.db.View(func(tx *bbolt.Tx) error {
+    count, err := s.DBViewPrefixCount(prefix)
+    if err != nil {
+        return nil, err
+    }
+
+    if count <= maxResults {
+        err := s.db.View(func(tx *bbolt.Tx) error {
+            bucket := tx.Bucket(bucketSmartStats)
+            if bucket == nil {
+                return nil
+            }
+            cursor := bucket.Cursor()
+            prefixBytes := []byte(prefix)
+            for k, v := cursor.Seek(prefixBytes); k != nil && bytes.HasPrefix(k, prefixBytes); k, v = cursor.Next() {
+                dataCopy := make([]byte, len(v))
+                copy(dataCopy, v)
+                result[string(k)] = dataCopy
+            }
+            return nil
+        })
+        return result, err
+    }
+
+    type kv struct {
+        key string
+        val []byte
+    }
+    reservoir := make([]kv, 0, maxResults)
+    total := 0
+
+    err = s.db.View(func(tx *bbolt.Tx) error {
         bucket := tx.Bucket(bucketSmartStats)
         if bucket == nil {
-            return nil 
+            return nil
         }
-
         cursor := bucket.Cursor()
         prefixBytes := []byte(prefix)
-        currentIndex := 0
-        recordCount := 0
-
-        var k, v []byte
-        for k, v = cursor.Seek(prefixBytes); k != nil && bytes.HasPrefix(k, prefixBytes) && currentIndex < skipOffset; k, v = cursor.Next() {
-            currentIndex++
-        }
-
-        for ; k != nil && bytes.HasPrefix(k, prefixBytes); k, v = cursor.Next() {
-            if recordCount >= maxResults {
-                break
-            }
-            recordCount++
-
-            key := string(k)
+        for k, v := cursor.Seek(prefixBytes); k != nil && bytes.HasPrefix(k, prefixBytes); k, v = cursor.Next() {
+            total++
             dataCopy := make([]byte, len(v))
             copy(dataCopy, v)
-            result[key] = dataCopy
+            item := kv{key: string(k), val: dataCopy}
+            if len(reservoir) < maxResults {
+                reservoir = append(reservoir, item)
+            } else {
+                j := rand.Intn(total)
+                if j < maxResults {
+                    reservoir[j] = item
+                }
+            }
         }
         return nil
     })
-    
+
+    for _, item := range reservoir {
+        result[item.key] = item.val
+    }
     return result, err
 }
 

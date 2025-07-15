@@ -46,8 +46,8 @@ const (
     
     MaxDomainsLimit         = 2000
     MinDomainsLimit         = 300
-    MaxCacheSizeLimit       = 2000
-    MinCacheSizeLimit       = 300
+    MaxCacheSizeLimit       = 4000 // DomainsLimit + PrefetchDomainsLimit
+    MinCacheSizeLimit       = 400
     MaxBatchThreshLimit     = 1000
     MinBatchThreshLimit     = 100
     MaxPrefetchDomainsLimit = 2000
@@ -202,22 +202,22 @@ func GetEffectiveDomain(host string, dstIP string) string {
                 return cachedResult
             }
         }
-        
+
         var result string
-        
+
         if ip := net.ParseIP(host); ip != nil {
             result = ip.String()
-        } else if eTLD, err := publicsuffix.EffectiveTLDPlusOne(host); err == nil {
+        } else if eTLD, err := publicsuffix.EffectiveTLDPlusOne(host); err == nil && eTLD != "" && eTLD != host {
             result = eTLD
         } else {
             result = host
         }
-        
+
         if domainResultCache != nil {
             cacheKey := "domain:" + host
             domainResultCache.Set(cacheKey, result)
         }
-        
+
         return result
     }
 
