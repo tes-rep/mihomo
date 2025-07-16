@@ -56,6 +56,7 @@ var (
     longConnProcessGroup singleflight.Group[interface{}]
     flushQueueOnce       atomic.Bool
     smartInitOnce        sync.Once
+    preloadOnce          sync.Once
 )
 
 type smartOption func(*Smart)
@@ -384,7 +385,7 @@ func (s *Smart) InitializeCache() {
 
     s.startTimedTask(5*time.Minute, checkInterval, "Clean up nodes", s.cleanupOrphanedNodeCache, true)
     s.startTimedTask(5*time.Second, checkInterval, "Preload frequent data", func() {
-        smartInitOnce.Do(func() {
+        preloadOnce.Do(func() {
             s.store.AdjustCacheParameters()
         })
         proxies := s.GetProxies(false)
