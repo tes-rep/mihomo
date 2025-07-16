@@ -177,71 +177,79 @@ func calculateTrafficFactor(trafficMB, durationMinutes float64, isShort bool) fl
     if trafficMB <= 0 || durationMinutes <= 0 {
         return 0.0
     }
-    
+
     throughput := trafficMB / math.Max(1.0, durationMinutes)
-    
+
     var baseFactor float64
     switch {
     case trafficMB < 1:
         baseFactor = trafficMB * 0.7
-        
     case trafficMB < 10:
         baseFactor = 0.7 + 0.3 * math.Log10(trafficMB)
-        
     case trafficMB < 50:
         baseFactor = 1.0 + 0.3 * math.Log10(trafficMB/10)
-        
     case trafficMB < 500:
         baseFactor = 1.3 + 0.3 * math.Log10(trafficMB/50)
-        
     case trafficMB < 3000:
         baseFactor = 1.6 + 0.3 * math.Log10(trafficMB/500)
-        
     default:
         baseFactor = 1.9 + 0.25 * math.Log10(trafficMB/3000)
     }
 
-    if durationMinutes < 0.5 && throughput > 80 {
-        baseFactor *= 1.2
-    } else if durationMinutes < 2 && throughput > 40 {
-        baseFactor *= 1.1
+    if isShort {
+        if throughput > 30 {
+            baseFactor *= 1.05
+        } else if throughput > 15 {
+            baseFactor *= 1.02
+        }
     }
-    
+
+    if durationMinutes < 0.5 && throughput > 35 {
+        baseFactor *= 1.15
+    } else if durationMinutes < 2 && throughput > 18 {
+        baseFactor *= 1.08
+    }
+
     var connectionFactor float64
     if isShort {
-        if throughput > 50 {
-            connectionFactor = 0.95
+        if throughput > 30 {
+            connectionFactor = 0.98
         } else if throughput > 10 {
-            connectionFactor = 0.9
+            connectionFactor = 0.92
         } else {
-            connectionFactor = 0.8
+            connectionFactor = 0.85
         }
     } else {
         connectionFactor = 1.0
 
-        if throughput > 300 {
-            baseFactor *= 1.5
-        } else if throughput > 150 {
-            baseFactor *= 1.4
-        } else if throughput > 75 {
-            baseFactor *= 1.3
+        if throughput > 70 {
+            baseFactor *= 1.45
+        } else if throughput > 50 {
+            baseFactor *= 1.32
         } else if throughput > 40 {
-            baseFactor *= 1.2
+            baseFactor *= 1.22
+        } else if throughput > 30 {
+            baseFactor *= 1.12
         } else if throughput > 20 {
-            baseFactor *= 1.1
+            baseFactor *= 1.05
         }
 
         // 特殊加成：高突发吞吐量场景
-        if durationMinutes < 2 && throughput > 100 {
-            baseFactor *= 1.15
+        if durationMinutes < 2 && throughput > 45 {
+            baseFactor *= 1.10
+        }
+        if durationMinutes < 1.5 && throughput > 60 {
+            baseFactor *= 1.16
+        }
+        if durationMinutes < 1.2 && throughput > 75 {
+            baseFactor *= 1.22
         }
     }
-    
+
     factor := baseFactor * connectionFactor
-    
+
     if isShort {
-        return math.Min(0.8, factor)
+        return math.Min(0.9, factor)
     }
-    
-    return math.Min(1.4, factor)
+    return math.Min(1.5, factor)
 }
