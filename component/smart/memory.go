@@ -188,7 +188,7 @@ func (s *Store) LoadAllPrefetchResults(group, config string, limit int) int {
     }
     
     prefetchPrefix := FormatDBKey("smart", KeyTypePrefetch, config, group)
-    results, err := s.DBViewPrefixScan(prefetchPrefix, limit*2)
+    results, err := s.DBViewPrefixScan(prefetchPrefix, limit)
     if err != nil {
         log.Warnln("[SmartStore] Failed to load prefetch results: %v", err)
         return 0
@@ -205,7 +205,7 @@ func (s *Store) LoadAllPrefetchResults(group, config string, limit int) int {
             continue
         }
         
-        var prefetchMap map[string]string
+        var prefetchMap map[string]interface{}
         if err := json.Unmarshal(v, &prefetchMap); err != nil {
             parseFailures++
             continue
@@ -226,87 +226,6 @@ func (s *Store) LoadAllPrefetchResults(group, config string, limit int) int {
     }
     
     return loadCount
-}
-
-// 加载域名到缓存
-func (s *Store) LoadDomainsToCache(group, config string, domains map[string][]string, maxDomains int) int {
-    if len(domains) == 0 {
-        return 0
-    }
-
-    loadedCount := 0
-    batchSize := 20
-    domainList := make([]string, 0, len(domains))
-    for domain := range domains {
-        domainList = append(domainList, domain)
-    }
-    if maxDomains > 0 && len(domainList) > maxDomains {
-        domainList = domainList[:maxDomains]
-    }
-
-    for i := 0; i < len(domainList); i += batchSize {
-        end := i + batchSize
-        if end > len(domainList) {
-            end = len(domainList)
-        }
-        batch := domainList[i:end]
-        for _, domain := range batch {
-            activeTypes := domains[domain]
-            for _, weightType := range activeTypes {
-                stats, err := s.GetStatsForDomain(group, config, domain)
-                if err != nil || len(stats) == 0 {
-                    continue
-                }
-                bestNode, bestWeight, _, _ := s.GetBestProxyForTarget(group, config, domain, weightType, false)
-                if bestNode != "" {
-                    s.StorePrefetchResult(group, config, domain, weightType, bestNode, bestWeight)
-                    loadedCount++
-                }
-            }
-        }
-    }
-    return loadedCount
-}
-
-// 加载ASN到缓存
-func (s *Store) LoadASNsToCache(group, config string, asns map[string][]string) int {
-    if len(asns) == 0 {
-        return 0
-    }
-
-    loadedCount := 0
-    batchSize := 20
-    asnList := make([]string, 0, len(asns))
-    for asn := range asns {
-        asnList = append(asnList, asn)
-    }
-
-    for i := 0; i < len(asnList); i += batchSize {
-        end := i + batchSize
-        if end > len(asnList) {
-            end = len(asnList)
-        }
-        batch := asnList[i:end]
-        for _, asn := range batch {
-            activeTypes := asns[asn]
-            for _, baseType := range activeTypes {
-                var weightType string
-                if baseType == WeightTypeTCP {
-                    weightType = WeightTypeTCPASN + ":" + asn
-                } else if baseType == WeightTypeUDP {
-                    weightType = WeightTypeUDPASN + ":" + asn
-                } else {
-                    continue
-                }
-                bestNode, bestWeight, _, _ := s.GetBestProxyForTarget(group, config, asn, weightType, false)
-                if bestNode != "" {
-                    s.StorePrefetchResult(group, config, asn, weightType, bestNode, bestWeight)
-                    loadedCount++
-                }
-            }
-        }
-    }
-    return loadedCount
 }
 
 func (s *Store) StoreUnwrapResult(group, config string, target string, proxyName string) {
@@ -503,14 +422,13 @@ func (s *Store) PreloadFrequentData(group, config string, proxies []string) {
     log.Infoln("[SmartStore] Starting data preloading for group [%s], config [%s]", group, config)
 
     globalCacheParams.mutex.RLock()
-    domainLimit := globalCacheParams.MaxDomains
-    asnLimit := globalCacheParams.PrefetchLimit / 2
+    domainLimit := globalCacheParams.MaxDomains / 2
     prefetchLoadLimit := globalCacheParams.PrefetchLimit
     globalCacheParams.mutex.RUnlock()
 
     start := time.Now()
 
-    s.LoadAllPrefetchResults(group, config, prefetchLoadLimit)
+    prefetchCount := s.LoadAllPrefetchResults(group, config, prefetchLoadLimit)
 
     stateData, err := s.GetNodeStates(group, config)
     nodeStatesCount := 0
@@ -521,17 +439,9 @@ func (s *Store) PreloadFrequentData(group, config string, proxies []string) {
     ranking, _ := s.GetNodeWeightRanking(group, config, true, proxies)
 
     domains, err := s.GetActiveDomains(group, config, domainLimit, false)
-    if err == nil && len(domains) > 0 {
-        s.LoadDomainsToCache(group, config, domains, domainLimit)
-    }
 
-    asns := s.GetActiveASNs(group, config, asnLimit, false)
-    if len(asns) > 0 {
-        s.LoadASNsToCache(group, config, asns)
-    }
-
-    log.Infoln("[SmartStore] Preloaded data for group [%s]: %d domains, %d ASNs, %d node stats, %d node rankings, completed in %.2f seconds", 
-        group, len(domains), len(asns), nodeStatesCount, len(ranking), time.Since(start).Seconds())
+    log.Infoln("[SmartStore] Preloaded data for group [%s]: %d domains, %d node stats, %d prefetch results, %d node rankings, completed in %.2f seconds", 
+        group, len(domains), nodeStatesCount, prefetchCount, len(ranking), time.Since(start).Seconds())
 }
 
 // 按级别清理内存缓存
