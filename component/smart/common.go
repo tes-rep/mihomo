@@ -46,7 +46,7 @@ const (
     
     MaxDomainsLimit         = 2000
     MinDomainsLimit         = 300
-    MaxCacheSizeLimit       = 4000 // DomainsLimit + PrefetchDomainsLimit
+    MaxCacheSizeLimit       = 3000 // DomainsLimit + PrefetchDomainsLimit
     MinCacheSizeLimit       = 400
     MaxBatchThreshLimit     = 500
     MinBatchThreshLimit     = 100
@@ -105,13 +105,6 @@ var (
     domainResultCache *lru.LruCache[string, string]
 
     StatsCache *lru.LruCache[string, *StatsRecord]
-
-    presetSceneParams = map[string]SceneParams{
-        "interactive": {0.4, 0.2, 0.4, 1.2, 1.0, 1.3, 0.3},
-        "streaming":   {0.5, 0.1, 0.4, 1.5, 0.8, 1.2, 0.2},
-        "transfer":    {0.6, 0.2, 0.2, 1.8, 0.7, 0.9, 0.1},
-        "web":         {0.5, 0.3, 0.2, 0.8, 0.6, 1.0, 0.2},
-    }
 )
 
 type (
@@ -140,6 +133,8 @@ type (
         Weights           map[string]float64  `json:"weights"`
         UploadTotal       float64             `json:"upload_total"`
         DownloadTotal     float64             `json:"download_total"`
+        MaxUploadRate     float64             `json:"max_upload_rate"`
+        MaxDownloadRate   float64             `json:"max_download_rate"`
         ConnectionDuration float64            `json:"connection_duration"`
     }
     
@@ -155,16 +150,6 @@ type (
     RankingData struct {
         Ranking     map[string]string `json:"ranking"`
         LastUpdated time.Time         `json:"last_updated"`
-    }
-
-    SceneParams struct {
-        successRateWeight  float64
-        connectTimeWeight  float64
-        latencyWeight      float64
-        trafficWeight      float64
-        durationWeight     float64
-        qualityWeight      float64
-        minDecayFactor     float64
     }
 )
 

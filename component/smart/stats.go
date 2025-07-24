@@ -10,9 +10,9 @@ import (
     "fmt"
     "hash/fnv"
     "sync"
-    "sync/atomic"
     "container/heap"
 
+    "github.com/metacubex/mihomo/common/atomic"
     "github.com/metacubex/mihomo/log"
 )
 
@@ -22,17 +22,18 @@ var (
 )
 
 type AtomicStatsRecord struct {
-    success     int64
-    failure     int64
-    connectTime int64
-    latency     int64
-    lastUsed    int64
-    
-    mu            sync.RWMutex
-    weights       map[string]float64
-    uploadTotal   float64
-    downloadTotal float64
-    duration      float64
+    success     atomic.Int64
+    failure     atomic.Int64
+    connectTime atomic.Int64
+    latency     atomic.Int64
+    lastUsed    atomic.Int64
+
+    weights         atomic.TypedValue[map[string]float64]
+    uploadTotal     atomic.Float64
+    downloadTotal   atomic.Float64
+    duration        atomic.Float64
+    maxUploadRate   atomic.Float64
+    maxDownloadRate atomic.Float64
 }
 
 type AtomicRecordManager struct {
@@ -93,41 +94,37 @@ func (m *AtomicRecordManager) GetOrCreateAtomicRecord(cacheKey string, store *St
     if value, ok := m.records.Load(cacheKey); ok {
         return value.(*AtomicStatsRecord)
     }
-    
-    record := &AtomicStatsRecord{
-        weights: make(map[string]float64),
-    }
-    atomic.StoreInt64(&record.lastUsed, time.Now().Unix())
-    
+
+    record := &AtomicStatsRecord{}
+    record.weights.Store(make(map[string]float64))
+    record.lastUsed.Store(time.Now().Unix())
+
     if store != nil {
         if existingData, err := store.GetStatsForDomain(groupName, configName, domain); err == nil {
             if data, exists := existingData[proxyName]; exists {
                 var existingRecord StatsRecord
                 if json.Unmarshal(data, &existingRecord) == nil {
-                    atomic.StoreInt64(&record.success, existingRecord.Success)
-                    atomic.StoreInt64(&record.failure, existingRecord.Failure)
-                    atomic.StoreInt64(&record.connectTime, existingRecord.ConnectTime)
-                    atomic.StoreInt64(&record.latency, existingRecord.Latency)
-                    atomic.StoreInt64(&record.lastUsed, existingRecord.LastUsed.Unix())
-                    
-                    record.mu.Lock()
-                    for k, v := range existingRecord.Weights {
-                        record.weights[k] = v
-                    }
-                    record.uploadTotal = existingRecord.UploadTotal
-                    record.downloadTotal = existingRecord.DownloadTotal
-                    record.duration = existingRecord.ConnectionDuration
-                    record.mu.Unlock()
+                    record.success.Store(existingRecord.Success)
+                    record.failure.Store(existingRecord.Failure)
+                    record.connectTime.Store(existingRecord.ConnectTime)
+                    record.latency.Store(existingRecord.Latency)
+                    record.lastUsed.Store(existingRecord.LastUsed.Unix())
+                    record.weights.Store(atomic.CloneMap(existingRecord.Weights))
+                    record.uploadTotal.Store(existingRecord.UploadTotal)
+                    record.downloadTotal.Store(existingRecord.DownloadTotal)
+                    record.duration.Store(existingRecord.ConnectionDuration)
+                    record.maxUploadRate.Store(existingRecord.MaxUploadRate)
+                    record.maxDownloadRate.Store(existingRecord.MaxDownloadRate)
                 }
             }
         }
     }
-    
+
     actual, loaded := m.records.LoadOrStore(cacheKey, record)
     if loaded {
         return actual.(*AtomicStatsRecord)
     }
-    
+
     return record
 }
 
@@ -138,127 +135,46 @@ func (record *AtomicStatsRecord) CreateStatsSnapshot() *StatsRecord {
             Weights: make(map[string]float64),
         }
     }
-    
-    success := record.Get("success")
-    failure := record.Get("failure")
-    connectTime := record.Get("connectTime")
-    latency := record.Get("latency")
-    lastUsed := record.Get("lastUsed")
-    uploadTotal := record.Get("uploadTotal")
-    downloadTotal := record.Get("downloadTotal")
-    duration := record.Get("duration")
-    weights := record.Get("weights")
-    
-    var successVal, failureVal, connectTimeVal, latencyVal, lastUsedVal int64
-    var uploadTotalVal, downloadTotalVal, durationVal float64
-    var weightsMap map[string]float64
-    
-    if success != nil {
-        if val, ok := success.(int64); ok {
-            successVal = val
-        }
-    }
-    
-    if failure != nil {
-        if val, ok := failure.(int64); ok {
-            failureVal = val
-        }
-    }
-    
-    if connectTime != nil {
-        if val, ok := connectTime.(int64); ok {
-            connectTimeVal = val
-        }
-    }
-    
-    if latency != nil {
-        if val, ok := latency.(int64); ok {
-            latencyVal = val
-        }
-    }
-    
-    if lastUsed != nil {
-        if val, ok := lastUsed.(int64); ok {
-            lastUsedVal = val
-        }
-    }
-    
-    if uploadTotal != nil {
-        if val, ok := uploadTotal.(float64); ok {
-            uploadTotalVal = val
-        }
-    }
-    
-    if downloadTotal != nil {
-        if val, ok := downloadTotal.(float64); ok {
-            downloadTotalVal = val
-        }
-    }
-    
-    if duration != nil {
-        if val, ok := duration.(float64); ok {
-            durationVal = val
-        }
-    }
-    
-    if weights != nil {
-        if val, ok := weights.(map[string]float64); ok {
-            weightsMap = val
-        } else {
-            weightsMap = make(map[string]float64)
-        }
-    } else {
-        weightsMap = make(map[string]float64)
-    }
-    
+
     return &StatsRecord{
-        Success:            successVal,
-        Failure:            failureVal,
-        ConnectTime:        connectTimeVal,
-        Latency:            latencyVal,
-        LastUsed:           time.Unix(lastUsedVal, 0),
-        Weights:            weightsMap,
-        UploadTotal:        uploadTotalVal,
-        DownloadTotal:      downloadTotalVal,
-        ConnectionDuration: durationVal,
+        Success:            record.success.Load(),
+        Failure:            record.failure.Load(),
+        ConnectTime:        record.connectTime.Load(),
+        Latency:            record.latency.Load(),
+        LastUsed:           time.Unix(record.lastUsed.Load(), 0),
+        Weights:            atomic.CloneMap(record.weights.Load()),
+        UploadTotal:        record.uploadTotal.Load(),
+        DownloadTotal:      record.downloadTotal.Load(),
+        MaxUploadRate:      record.maxUploadRate.Load(),
+        MaxDownloadRate:    record.maxDownloadRate.Load(),
+        ConnectionDuration: record.duration.Load(),
     }
 }
 
 func (r *AtomicStatsRecord) Get(field string) interface{} {
     switch field {
     case "success":
-        return atomic.LoadInt64(&r.success)
+        return r.success.Load()
     case "failure":
-        return atomic.LoadInt64(&r.failure)
+        return r.failure.Load()
     case "connectTime":
-        return atomic.LoadInt64(&r.connectTime)
+        return r.connectTime.Load()
     case "latency":
-        return atomic.LoadInt64(&r.latency)
+        return r.latency.Load()
     case "lastUsed":
-        return atomic.LoadInt64(&r.lastUsed)
+        return r.lastUsed.Load()
     case "weights":
-        r.mu.RLock()
-        defer r.mu.RUnlock()
-        if r.weights == nil {
-            return nil
-        }
-        result := make(map[string]float64, len(r.weights))
-        for k, v := range r.weights {
-            result[k] = v
-        }
-        return result
+        return atomic.CloneMap(r.weights.Load())
     case "uploadTotal":
-        r.mu.RLock()
-        defer r.mu.RUnlock()
-        return r.uploadTotal
+        return r.uploadTotal.Load()
     case "downloadTotal":
-        r.mu.RLock()
-        defer r.mu.RUnlock()
-        return r.downloadTotal
+        return r.downloadTotal.Load()
+    case "maxUploadRate":
+        return r.maxUploadRate.Load()
+    case "maxDownloadRate":
+        return r.maxDownloadRate.Load()
     case "duration":
-        r.mu.RLock()
-        defer r.mu.RUnlock()
-        return r.duration
+        return r.duration.Load()
     default:
         return nil
     }
@@ -268,41 +184,47 @@ func (r *AtomicStatsRecord) Set(field string, value interface{}) {
     switch field {
     case "success":
         if v, ok := value.(int64); ok {
-            atomic.StoreInt64(&r.success, v)
+            r.success.Store(v)
         }
     case "failure":
         if v, ok := value.(int64); ok {
-            atomic.StoreInt64(&r.failure, v)
+            r.failure.Store(v)
         }
     case "connectTime":
         if v, ok := value.(int64); ok {
-            atomic.StoreInt64(&r.connectTime, v)
+            r.connectTime.Store(v)
         }
     case "latency":
         if v, ok := value.(int64); ok {
-            atomic.StoreInt64(&r.latency, v)
+            r.latency.Store(v)
         }
     case "lastUsed":
         if v, ok := value.(int64); ok {
-            atomic.StoreInt64(&r.lastUsed, v)
+            r.lastUsed.Store(v)
         }
     case "uploadTotal":
         if v, ok := value.(float64); ok {
-            r.mu.Lock()
-            defer r.mu.Unlock()
-            r.uploadTotal = v
+            r.uploadTotal.Store(v)
         }
     case "downloadTotal":
         if v, ok := value.(float64); ok {
-            r.mu.Lock()
-            defer r.mu.Unlock()
-            r.downloadTotal = v
+            r.downloadTotal.Store(v)
+        }
+    case "maxUploadRate":
+        if v, ok := value.(float64); ok {
+            r.maxUploadRate.Store(v)
+        }
+    case "maxDownloadRate":
+        if v, ok := value.(float64); ok {
+            r.maxDownloadRate.Store(v)
         }
     case "duration":
         if v, ok := value.(float64); ok {
-            r.mu.Lock()
-            defer r.mu.Unlock()
-            r.duration = v
+            r.duration.Store(v)
+        }
+    case "weights":
+        if v, ok := value.(map[string]float64); ok {
+            r.weights.Store(atomic.CloneMap(v))
         }
     }
 }
@@ -311,46 +233,37 @@ func (r *AtomicStatsRecord) Add(field string, value interface{}) {
     switch field {
     case "success":
         if v, ok := value.(int64); ok {
-            atomic.AddInt64(&r.success, v)
+            r.success.Add(v)
         }
     case "failure":
         if v, ok := value.(int64); ok {
-            atomic.AddInt64(&r.failure, v)
+            r.failure.Add(v)
         }
     case "uploadTotal":
         if v, ok := value.(float64); ok {
-            r.mu.Lock()
-            defer r.mu.Unlock()
-            r.uploadTotal += v
+            r.uploadTotal.Add(v)
         }
     case "downloadTotal":
         if v, ok := value.(float64); ok {
-            r.mu.Lock()
-            defer r.mu.Unlock()
-            r.downloadTotal += v
+            r.downloadTotal.Add(v)
         }
     }
 }
 
-// 权重相关的特殊方法
 func (r *AtomicStatsRecord) GetWeight(weightType string) float64 {
-    r.mu.RLock()
-    defer r.mu.RUnlock()
-    
-    if r.weights == nil {
+    weights := r.weights.Load()
+    if weights == nil {
         return 0
     }
-    return r.weights[weightType]
+    return weights[weightType]
 }
 
 func (r *AtomicStatsRecord) SetWeight(weightType string, value float64) {
-    r.mu.Lock()
-    defer r.mu.Unlock()
-    
-    if r.weights == nil {
-        r.weights = make(map[string]float64)
-    }
-    r.weights[weightType] = value
+    r.weights.Update(func(old map[string]float64) map[string]float64 {
+        newMap := atomic.CloneMap(old)
+        newMap[weightType] = value
+        return newMap
+    })
 }
 
 // 获取节点权重排名
@@ -642,9 +555,9 @@ func (s *Store) StoreNodeWeightRanking(group, config string, ranking map[string]
 }
 
 // 获取目标的最佳代理
-func (s *Store) GetBestProxyForTarget(group, config string, target string, weightType string, allStats bool) (string, float64, map[string]float64, error) {
+func (s *Store) GetBestProxyForTarget(group, config string, target string, weightType string, allStats bool) (string, float64, error) {
     if target == "" {
-        return "", 0, nil, errors.New("empty target")
+        return "", 0, errors.New("empty target")
     }
 
     now := time.Now().Unix()
@@ -657,7 +570,7 @@ func (s *Store) GetBestProxyForTarget(group, config string, target string, weigh
 
     allStatsMap, err := s.GetAllStats(group, config, allStats)
     if err != nil {
-        return "", 0, nil, err
+        return "", 0, err
     }
 
     nodeStatesMap := make(map[string]NodeState)
@@ -700,7 +613,7 @@ func (s *Store) GetBestProxyForTarget(group, config string, target string, weigh
         if stats, ok := allStatsMap[target]; ok {
             domainStats = stats
         } else {
-            return "", 0, nodesWithWeight, nil
+            return "", 0, errors.New("empty stats")
         }
         for nodeName, data := range domainStats {
             var record StatsRecord
@@ -857,9 +770,9 @@ func (s *Store) GetBestProxyForTarget(group, config string, target string, weigh
                 bestNode = node
             }
         }
-        return bestNode, bestWeight, nodesWithWeight, nil
+        return bestNode, bestWeight, nil
     } else {
-        return "", 0, nodesWithWeight, nil
+        return "", 0, errors.New("not enough nodes with valid weights")
     }
 }
 
@@ -1076,7 +989,7 @@ func (s *Store) RunPrefetch(group, config string, proxyMap map[string]string) in
     // 域名
     for domain, activeTypes := range domains {
         for _, weightType := range activeTypes {
-            bestNode, bestWeight, _, err := s.GetBestProxyForTarget(group, config, domain, weightType, true)
+            bestNode, bestWeight, err := s.GetBestProxyForTarget(group, config, domain, weightType, true)
             if err != nil || bestNode == "" || bestWeight <= 0 {
                 continue
             }
@@ -1103,7 +1016,7 @@ func (s *Store) RunPrefetch(group, config string, proxyMap map[string]string) in
             } else {
                 continue
             }
-            bestNode, bestWeight, _, err := s.GetBestProxyForTarget(group, config, asn, weightType, true)
+            bestNode, bestWeight, err := s.GetBestProxyForTarget(group, config, asn, weightType, true)
             if err != nil || bestNode == "" || bestWeight <= 0 {
                 continue
             }
@@ -1125,6 +1038,8 @@ func (s *Store) RunPrefetch(group, config string, proxyMap map[string]string) in
         if item.bestWeight == 0 {
             continue
         }
+        newWeight := math.Round(item.bestWeight*100) / 100
+        oldWeightRounded := math.Round(oldWeight*100) / 100
         if oldNode == "" {
             s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
             prefetchDomains++
@@ -1133,13 +1048,13 @@ func (s *Store) RunPrefetch(group, config string, proxyMap map[string]string) in
             continue
         }
         if oldNode == item.bestNode {
-            if int(item.bestWeight*100) != int(oldWeight*100) {
+            if newWeight != oldWeightRounded {
                 s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
                 prefetchDomains++
                 log.Debugln("[SmartStore] Prefetching domain [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (old: %.2f, same node, weight changed)",
                     item.target, item.bestNode, group, item.weightType, item.bestWeight, oldWeight)
             }
-        } else if int(item.bestWeight*100) > int(oldWeight*100) {
+        } else if newWeight > oldWeightRounded {
             s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
             prefetchDomains++
             log.Debugln("[SmartStore] Prefetching domain [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (old: %.2f, upgraded)",
@@ -1153,6 +1068,8 @@ func (s *Store) RunPrefetch(group, config string, proxyMap map[string]string) in
         if item.bestWeight == 0 {
             continue
         }
+        newWeight := math.Round(item.bestWeight*100) / 100
+        oldWeightRounded := math.Round(oldWeight*100) / 100
         if oldNode == "" {
             s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
             prefetchASNs++
@@ -1161,13 +1078,13 @@ func (s *Store) RunPrefetch(group, config string, proxyMap map[string]string) in
             continue
         }
         if oldNode == item.bestNode {
-            if int(item.bestWeight*100) != int(oldWeight*100) {
+            if newWeight != oldWeightRounded {
                 s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
                 prefetchASNs++
                 log.Debugln("[SmartStore] Prefetching ASN [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (old: %.2f, same node, weight changed)",
                     item.target, item.bestNode, group, item.weightType, item.bestWeight, oldWeight)
             }
-        } else if int(item.bestWeight*100) > int(oldWeight*100) {
+        } else if newWeight > oldWeightRounded {
             s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
             prefetchASNs++
             log.Debugln("[SmartStore] Prefetching ASN [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (old: %.2f, upgraded)",

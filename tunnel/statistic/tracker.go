@@ -21,23 +21,33 @@ type Tracker interface {
 	C.Connection
 }
 
+type rateSample struct {
+	timestamp time.Time
+	bytes     int64
+}
+
 type TrackerInfo struct {
-	UUID          uuid.UUID    `json:"id"`
-	Metadata      *C.Metadata  `json:"metadata"`
-	UploadTotal   atomic.Int64 `json:"upload"`
-	DownloadTotal atomic.Int64 `json:"download"`
-	Start         time.Time    `json:"start"`
-	Chain         C.Chain      `json:"chains"`
-	Rule          string       `json:"rule"`
-	RulePayload   string       `json:"rulePayload"`
+	UUID            uuid.UUID    `json:"id"`
+	Metadata        *C.Metadata  `json:"metadata"`
+	UploadTotal     atomic.Int64 `json:"upload"`
+	DownloadTotal   atomic.Int64 `json:"download"`
+	Start           time.Time    `json:"start"`
+	Chain           C.Chain      `json:"chains"`
+	Rule            string       `json:"rule"`
+	RulePayload     string       `json:"rulePayload"`
+	MaxUploadRate   atomic.Int64 `json:"maxUploadRate"`
+	MaxDownloadRate atomic.Int64 `json:"maxDownloadRate"`
 }
 
 type tcpTracker struct {
-	C.Conn `json:"-"`
+	C.Conn             `json:"-"`
 	*TrackerInfo
-	manager *Manager
+	manager            *Manager
 
-	pushToManager bool `json:"-"`
+	pushToManager      bool `json:"-"`
+
+	uploadRateWindow   []rateSample
+	downloadRateWindow []rateSample
 }
 
 func (tt *tcpTracker) ID() string {
@@ -55,6 +65,7 @@ func (tt *tcpTracker) Read(b []byte) (int, error) {
 		tt.manager.PushDownloaded(download)
 	}
 	tt.DownloadTotal.Add(download)
+	updateMaxRate(&tt.downloadRateWindow, download, &tt.TrackerInfo.MaxDownloadRate, 5)
 	return n, err
 }
 
@@ -65,6 +76,7 @@ func (tt *tcpTracker) ReadBuffer(buffer *buf.Buffer) (err error) {
 		tt.manager.PushDownloaded(download)
 	}
 	tt.DownloadTotal.Add(download)
+	updateMaxRate(&tt.downloadRateWindow, download, &tt.TrackerInfo.MaxDownloadRate, 5)
 	return
 }
 
@@ -74,6 +86,7 @@ func (tt *tcpTracker) UnwrapReader() (io.Reader, []N.CountFunc) {
 			tt.manager.PushDownloaded(download)
 		}
 		tt.DownloadTotal.Add(download)
+		updateMaxRate(&tt.downloadRateWindow, download, &tt.TrackerInfo.MaxDownloadRate, 5)
 	}}
 }
 
@@ -84,6 +97,7 @@ func (tt *tcpTracker) Write(b []byte) (int, error) {
 		tt.manager.PushUploaded(upload)
 	}
 	tt.UploadTotal.Add(upload)
+	updateMaxRate(&tt.uploadRateWindow, upload, &tt.TrackerInfo.MaxUploadRate, 5)
 	return n, err
 }
 
@@ -94,6 +108,7 @@ func (tt *tcpTracker) WriteBuffer(buffer *buf.Buffer) (err error) {
 		tt.manager.PushUploaded(upload)
 	}
 	tt.UploadTotal.Add(upload)
+	updateMaxRate(&tt.uploadRateWindow, upload, &tt.TrackerInfo.MaxUploadRate, 5)
 	return
 }
 
@@ -103,6 +118,7 @@ func (tt *tcpTracker) UnwrapWriter() (io.Writer, []N.CountFunc) {
 			tt.manager.PushUploaded(upload)
 		}
 		tt.UploadTotal.Add(upload)
+		updateMaxRate(&tt.uploadRateWindow, upload, &tt.TrackerInfo.MaxUploadRate, 5)
 	}}
 }
 
@@ -157,11 +173,14 @@ func NewTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.R
 }
 
 type udpTracker struct {
-	C.PacketConn `json:"-"`
+	C.PacketConn     `json:"-"`
 	*TrackerInfo
-	manager *Manager
+	manager          *Manager
 
-	pushToManager bool `json:"-"`
+	pushToManager    bool `json:"-"`
+
+	uploadRateWindow   []rateSample
+	downloadRateWindow []rateSample
 }
 
 func (ut *udpTracker) ID() string {
@@ -179,6 +198,7 @@ func (ut *udpTracker) ReadFrom(b []byte) (int, net.Addr, error) {
 		ut.manager.PushDownloaded(download)
 	}
 	ut.DownloadTotal.Add(download)
+	updateMaxRate(&ut.downloadRateWindow, download, &ut.TrackerInfo.MaxDownloadRate, 5)
 	return n, addr, err
 }
 
@@ -189,6 +209,7 @@ func (ut *udpTracker) WaitReadFrom() (data []byte, put func(), addr net.Addr, er
 		ut.manager.PushDownloaded(download)
 	}
 	ut.DownloadTotal.Add(download)
+	updateMaxRate(&ut.downloadRateWindow, download, &ut.TrackerInfo.MaxDownloadRate, 5)
 	return
 }
 
@@ -199,6 +220,7 @@ func (ut *udpTracker) WriteTo(b []byte, addr net.Addr) (int, error) {
 		ut.manager.PushUploaded(upload)
 	}
 	ut.UploadTotal.Add(upload)
+	updateMaxRate(&ut.uploadRateWindow, upload, &ut.TrackerInfo.MaxUploadRate, 5)
 	return n, err
 }
 
@@ -250,4 +272,27 @@ func NewUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, ru
 
 	manager.Join(ut)
 	return ut
+}
+
+func updateMaxRate(rateWindow *[]rateSample, current int64, maxRate *atomic.Int64, windowSec int) {
+	now := time.Now()
+	*rateWindow = append(*rateWindow, rateSample{timestamp: now, bytes: current})
+
+	windowStart := now.Add(-time.Duration(windowSec) * time.Second)
+	i := 0
+	for ; i < len(*rateWindow); i++ {
+		if (*rateWindow)[i].timestamp.After(windowStart) {
+			break
+		}
+	}
+	*rateWindow = (*rateWindow)[i:]
+
+	var totalBytes int64
+	for _, sample := range *rateWindow {
+		totalBytes += sample.bytes
+	}
+	avgRate := int64(float64(totalBytes) / float64(windowSec))
+	if avgRate > maxRate.Load() {
+		maxRate.Store(avgRate)
+	}
 }

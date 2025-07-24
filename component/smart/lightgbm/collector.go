@@ -186,14 +186,14 @@ func (c *DataCollector) initializeWriter() error {
             reader := csv.NewReader(f)
             headers, err := reader.Read()
             if err == nil {
-                hasHash := false
+                hasMax := false
                 for _, h := range headers {
-                    if h == "asn_hash" {
-                        hasHash = true
+                    if h == "maxuploadrate_kb" {
+                        hasMax = true
                         break
                     }
                 }
-                if !hasHash {
+                if !hasMax {
                     needUpgrade = true
                 }
             }
@@ -218,8 +218,8 @@ func (c *DataCollector) initializeWriter() error {
     if !fileExists {
         headers := []string{
             "success", "failure", "connect_time", "latency", 
-            "upload_mb", "download_mb", "duration_minutes",
-            "last_used_seconds", "is_udp", "is_tcp",
+            "upload_mb", "download_mb", "maxuploadrate_kb", "maxdownloadrate_kb",
+            "duration_minutes", "last_used_seconds", "is_udp", "is_tcp",
             "asn_feature", "country_feature",
             "address_feature", "port_feature", 
             "traffic_ratio", "traffic_density", "connection_type_feature",
