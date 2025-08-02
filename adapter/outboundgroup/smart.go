@@ -81,6 +81,7 @@ type Smart struct {
     dataCollector    *lightgbm.DataCollector
     weightModel      *lightgbm.WeightModel
     strategy         string
+    sampleRate       float64
 }
 
 type (
@@ -811,6 +812,7 @@ func (s *Smart) MarshalJSON() ([]byte, error) {
         "strategy":       s.strategy,
         "useLightGBM":    s.useLightGBM,
         "collectData":    s.collectData,
+        "sampleRate":     s.sampleRate,
     })
 }
 
@@ -1171,6 +1173,12 @@ func (s *Smart) logConnectionStats(record *smart.StatsRecord, metadata *C.Metada
 // 数据收集
 func (s *Smart) collectConnectionData(status string, record *smart.StatsRecord, metadata *C.Metadata,
     uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, baseWeight float64, proxyName string, isModelPredicted bool) {
+    
+    // 采样率控制
+    if s.sampleRate < 1.0 && rand.Float64() > s.sampleRate {
+        return
+    }
+    
     var input *lightgbm.ModelInput
     
     if status == "failed" {
@@ -1643,6 +1651,17 @@ func smartWithStrategy(config map[string]any) string {
     return "sticky-sessions"
 }
 
+func smartWithSampleRate(sampleRate float64) smartOption {
+    return func(s *Smart) {
+        if sampleRate < 0 {
+            sampleRate = 1
+        } else if sampleRate > 1 {
+            sampleRate = 1
+        }
+        s.sampleRate = sampleRate
+    }
+}
+
 func parseSmartOption(config map[string]any) ([]smartOption, string) {
     opts := []smartOption{}
 
@@ -1663,6 +1682,17 @@ func parseSmartOption(config map[string]any) ([]smartOption, string) {
     if elm, ok := config["collectdata"]; ok {
         if collectData, ok := elm.(bool); ok {
             opts = append(opts, smartWithCollectData(collectData))
+        }
+    }
+
+    if elm, ok := config["sample-rate"]; ok {
+        switch v := elm.(type) {
+        case float64:
+            opts = append(opts, smartWithSampleRate(v))
+        case float32:
+            opts = append(opts, smartWithSampleRate(float64(v)))
+        case int:
+            opts = append(opts, smartWithSampleRate(float64(v)))
         }
     }
 

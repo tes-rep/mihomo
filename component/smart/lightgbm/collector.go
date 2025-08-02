@@ -8,7 +8,6 @@ import (
     "sync"
     "time"
     "strings"
-    "math/rand"
 
     C "github.com/metacubex/mihomo/constant"
     "github.com/metacubex/mihomo/log"
@@ -18,31 +17,45 @@ var (
     collectMutex sync.Mutex
     globalCollector *DataCollector
     collectorInitOnce sync.Once
+    configuredSmartCollectorSize int64
 )
 
 type DataCollector struct {
-    mutex       sync.Mutex
-    sampleCount int
-    dataPath    string
-    file        *os.File
-    writer      *csv.Writer
-    configured  bool
-
-    maxFileSize      int64
-    sampleRate       float64
+    mutex             sync.Mutex
+    sampleCount       int
+    dataPath          string
+    file              *os.File
+    writer            *csv.Writer
+    configured        bool
+    smartCollectorSize int64
 }
 
 const (
-    defaultMaxFileSize  = 100 * 1024 * 1024
-    defaultSampleRate   = 1.0
+    defaultSmartCollectorSize  = 100 * 1024 * 1024
 )
+
+func SetSmartCollectorSize(sizeMB float64) {
+    collectMutex.Lock()
+    defer collectMutex.Unlock()
+    
+    if sizeMB <= 0 {
+        configuredSmartCollectorSize = defaultSmartCollectorSize
+        return
+    }
+    
+    configuredSmartCollectorSize = int64(sizeMB * 1024 * 1024)
+}
 
 func GetCollector() *DataCollector {
     collectorInitOnce.Do(func() {
+        smartCollectorSize := configuredSmartCollectorSize
+        if smartCollectorSize <= 0 {
+            smartCollectorSize = defaultSmartCollectorSize
+        }
+        
         globalCollector = &DataCollector{
-            dataPath:         filepath.Join(C.Path.HomeDir(), "smart_weight_data.csv"),
-            maxFileSize:      defaultMaxFileSize,
-            sampleRate:       defaultSampleRate,
+            dataPath:          filepath.Join(C.Path.HomeDir(), "smart_weight_data.csv"),
+            smartCollectorSize: smartCollectorSize,
         }
     })
     
@@ -51,11 +64,6 @@ func GetCollector() *DataCollector {
 
 func (c *DataCollector) AddSample(input *ModelInput, metadata *C.Metadata, actualWeight float64, weightSource string) {
     if c == nil || metadata == nil || input == nil {
-        return
-    }
-    
-    // 采样率控制 - 随机丢弃一部分样本
-    if c.sampleRate < 1.0 && rand.Float64() > c.sampleRate {
         return
     }
 
@@ -77,8 +85,8 @@ func (c *DataCollector) AddSample(input *ModelInput, metadata *C.Metadata, actua
     // 检查文件大小限制
     if c.file != nil {
         stat, err := c.file.Stat()
-        if err == nil && stat.Size() > c.maxFileSize {
-            log.Infoln("[Smart] Maximum file size limit reached (%d MB), stopping data collection", c.maxFileSize/(1024*1024))
+        if err == nil && stat.Size() > c.smartCollectorSize {
+            log.Infoln("[Smart] Maximum file size limit reached (%d MB), stopping data collection", c.smartCollectorSize/(1024*1024))
             return
         }
     }

@@ -29,6 +29,7 @@ import (
 	tlsC "github.com/metacubex/mihomo/component/tls"
 	"github.com/metacubex/mihomo/component/trie"
 	"github.com/metacubex/mihomo/component/updater"
+	"github.com/metacubex/mihomo/component/smart/lightgbm"
 	"github.com/metacubex/mihomo/config"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/constant/provider"
@@ -430,6 +431,8 @@ func updateUsers(users []auth.AuthUser) {
 
 func updateProfile(cfg *config.Config) {
 	profileCfg := cfg.Profile
+
+	lightgbm.SetSmartCollectorSize(profileCfg.SmartCollectorSize)
 
 	profile.StoreSelected.Store(profileCfg.StoreSelected)
 	if profileCfg.StoreSelected {

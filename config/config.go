@@ -167,8 +167,9 @@ type DNS struct {
 
 // Profile config
 type Profile struct {
-	StoreSelected bool
-	StoreFakeIP   bool
+	StoreSelected      bool
+	StoreFakeIP        bool
+	SmartCollectorSize float64
 }
 
 // TLS config
@@ -334,8 +335,9 @@ type RawExperimental struct {
 }
 
 type RawProfile struct {
-	StoreSelected bool `yaml:"store-selected" json:"store-selected"`
-	StoreFakeIP   bool `yaml:"store-fake-ip" json:"store-fake-ip"`
+	StoreSelected      bool  `yaml:"store-selected" json:"store-selected"`
+	StoreFakeIP        bool  `yaml:"store-fake-ip" json:"store-fake-ip"`
+	SmartCollectorSize float64 `yaml:"smart-collector-size" json:"smart-collector-size"`
 }
 
 type RawGeoXUrl struct {
@@ -547,7 +549,8 @@ func DefaultRawConfig() *RawConfig {
 			QUICGoDisableECN: true,
 		},
 		Profile: RawProfile{
-			StoreSelected: true,
+			StoreSelected:      true,
+			SmartCollectorSize: 100,
 		},
 		GeoXUrl: RawGeoXUrl{
 			Mmdb:    "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb",
@@ -819,8 +822,9 @@ func parseNTP(cfg *RawConfig) (*NTP, error) {
 
 func parseProfile(cfg *RawConfig) (*Profile, error) {
 	return &Profile{
-		StoreSelected: cfg.Profile.StoreSelected,
-		StoreFakeIP:   cfg.Profile.StoreFakeIP,
+		StoreSelected:      cfg.Profile.StoreSelected,
+		StoreFakeIP:        cfg.Profile.StoreFakeIP,
+		SmartCollectorSize: cfg.Profile.SmartCollectorSize,
 	}, nil
 }
 
