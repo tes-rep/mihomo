@@ -9,6 +9,7 @@ import (
     "strings"
     "sync"
     "time"
+    "math"
     "strconv"
     "math/rand"
     "sync/atomic"
@@ -885,26 +886,88 @@ func (s *Smart) cleanupOrphanedNodeCache() {
 	}
 }
 
-func (s *Smart) checkNodeQualityDegradation(domain, proxyName string, newWeight, oldWeight float64, connectionDuration int64, uploadTotal float64, downloadTotal float64, weightType string) (float64, bool) {
-    // 识别并处理0流量连接
+func (s *Smart) checkNodeQualityDegradation(
+    domain, proxyName string,
+    newWeight, oldWeight float64,
+    connectionDuration int64,
+    uploadTotal, downloadTotal float64,
+    maxUploadRateKB, maxDownloadRateKB, historyMaxUploadRateKB, historyMaxDownloadRateKB float64,
+    historyUploadTotal, historyDownloadTotal float64,
+    success int64, weightType string) (float64, bool) {
+    
+    // 零流量连接
     if connectionDuration > 1000 && downloadTotal == 0 && uploadTotal == 0 {
         degradedWeight := newWeight * 0.3
-        
-        log.Debugln("[Smart] Zero-traffic connection detected: [%s] for domain [%s], conn time: %dms, forcing weight degradation from %.4f to %.4f (%s)", 
+        log.Debugln("[Smart] Zero-traffic connection detected: [%s] for domain [%s], conn time: %dms, forcing weight degradation from %.4f to %.4f (%s)",
             proxyName, domain, connectionDuration, newWeight, degradedWeight, weightType)
-                
         return degradedWeight, true
     }
-    
-    // 处理权重显著下降
-    if oldWeight > 0 {
+
+    // 权重显著下降
+    if oldWeight > 0 && success >= 3 {
         weightChangeRatio := (newWeight - oldWeight) / oldWeight
         
-        if weightChangeRatio < -0.3 {
-            log.Debugln("[Smart] Node quality degraded: [%s] for domain [%s], weight from %.4f to %.4f (%.1f%%) (%s)", 
-                proxyName, domain, oldWeight, newWeight, weightChangeRatio*100, weightType)
+        var thresholdRatio float64
+        switch {
+        case success >= 300:
+            thresholdRatio = -0.6
+        case success >= 100:
+            thresholdRatio = -0.5
+        case success >= 20:
+            thresholdRatio = -0.4
+        default:
+            thresholdRatio = -0.3
+        }
+
+        if weightChangeRatio < thresholdRatio {
+            avgDownload := 0.0
+            avgUpload := 0.0
+            if success > 0 {
+                avgDownload = historyDownloadTotal / float64(success)
+                avgUpload = historyUploadTotal / float64(success)
+            }
             
-            return newWeight, true
+            trafficCompareRatio := 0.3
+            speedCompareRatio := 0.6
+            
+            var performanceIssues int = 0
+            
+            if avgDownload > 0 && downloadTotal < avgDownload*trafficCompareRatio {
+                performanceIssues++
+            }
+            if avgUpload > 0 && uploadTotal < avgUpload*trafficCompareRatio {
+                performanceIssues++
+            }
+            
+            if historyMaxUploadRateKB > 0 && maxUploadRateKB < historyMaxUploadRateKB*speedCompareRatio {
+                performanceIssues++
+            }
+            if historyMaxDownloadRateKB > 0 && maxDownloadRateKB < historyMaxDownloadRateKB*speedCompareRatio {
+                performanceIssues++
+            }
+            
+            if performanceIssues >= 2 {
+                var adjustmentFactor float64
+                switch {
+                case weightChangeRatio < -0.7:
+                    adjustmentFactor = 0.7
+                case weightChangeRatio < -0.6:
+                    adjustmentFactor = 0.75
+                case weightChangeRatio < -0.5:
+                    adjustmentFactor = 0.8
+                default:
+                    adjustmentFactor = 0.85
+                }
+                
+                limitedWeight := math.Max(newWeight, oldWeight*adjustmentFactor)
+                
+                log.Debugln("[Smart] Node quality degraded: [%s] for domain [%s], "+
+                    "weight from %.4f to %.4f (%.1f%%), limited to %.4f (%s)",
+                    proxyName, domain, oldWeight, newWeight, weightChangeRatio*100, 
+                    limitedWeight, weightType)
+                
+                return limitedWeight, true
+            }
         }
     }
 
@@ -1113,11 +1176,16 @@ func (s *Smart) collectConnectionData(status string, record *smart.StatsRecord, 
     if status == "failed" {
         input = lightgbm.CreateModelInputFromStats(
             record.Success, record.Failure, record.ConnectTime, record.Latency,
+            0, 0, 0, 0, 0, 0, 0, 0,
+            0, record.LastUsed.Unix(),
             metadata.NetWork == C.UDP, metadata.NetWork == C.TCP,
-            0, 0, 0, 0, 0, record.LastUsed.Unix(), metadata,
+            metadata,
         )
     } else if status == "closed" {
-        input = lightgbm.CreateModelInputFromStatsRecord(record, metadata, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate)
+        input = lightgbm.CreateModelInputFromStatsRecord(
+            record, metadata,
+            uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate,
+        )
     }
     
     if input != nil {
@@ -1219,8 +1287,9 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
         if s.useLightGBM && s.weightModel != nil {
             input := lightgbm.CreateModelInputFromStats(
                 success, failure, connectTimeVal, latencyVal,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, lastUsedVal,
                 metadata.NetWork == C.UDP, metadata.NetWork == C.TCP,
-                0, 0, 0, 0, 0, time.Now().Unix(), metadata,
+                metadata,
             )
             if input != nil {
                 calculatedWeight, isModelPredicted = s.weightModel.PredictWeight(input, priorityFactor)
@@ -1278,7 +1347,10 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 
         if s.useLightGBM && s.weightModel != nil {
             tempRecord := atomicRecord.CreateStatsSnapshot()
-            input := lightgbm.CreateModelInputFromStatsRecord(tempRecord, metadata, uploadTotalMB, downloadTotalMB, maxUploadRateKB, maxDownloadRateKB)
+            input := lightgbm.CreateModelInputFromStatsRecord(
+                tempRecord, metadata,
+                uploadTotalMB, downloadTotalMB, maxUploadRateKB, maxDownloadRateKB,
+            )
             if input != nil {
                 calculatedWeight, isModelPredicted = s.weightModel.PredictWeight(input, priorityFactor)
             } else {
@@ -1317,8 +1389,17 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 
     if status == "closed" {
         if needCheckQuality {
-            degradedWeight, isDegraded = s.checkNodeQualityDegradation(domain, proxy.Name(), calculatedWeight, oldWeight, 
-                connectionDuration, uploadTotalMB, downloadTotalMB, weightType)
+            historyMaxUploadRateKB := atomicRecord.Get("maxUploadRate").(float64)
+            historyMaxDownloadRateKB := atomicRecord.Get("maxDownloadRate").(float64)
+            historyUploadTotal := atomicRecord.Get("uploadTotal").(float64)
+            historyDownloadTotal := atomicRecord.Get("downloadTotal").(float64)
+            success := atomicRecord.Get("success").(int64)
+            
+            degradedWeight, isDegraded = s.checkNodeQualityDegradation(
+                domain, proxy.Name(), calculatedWeight, oldWeight,
+                connectionDuration, uploadTotalMB, downloadTotalMB,
+                maxUploadRateKB, maxDownloadRateKB, historyMaxUploadRateKB, historyMaxDownloadRateKB,
+                historyUploadTotal, historyDownloadTotal, success, weightType)
         }
     }
 

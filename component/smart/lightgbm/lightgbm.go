@@ -22,7 +22,7 @@ import (
 )
 
 const (
-    MaxFeatureSize = 23
+    MaxFeatureSize = 27
 )
 
 var (
@@ -406,17 +406,26 @@ type ModelInput struct {
     Failure         int64   // 失败次数
     ConnectTime     int64   // 连接时间(毫秒)
     Latency         int64   // 延迟(毫秒)
-    UploadTotal     float64 // 上传流量(字节)
-    DownloadTotal   float64 // 下载流量(字节)
-    MaxuploadRate   float64 // 最大上传速率(字节/秒)
-    MaxdownloadRate float64 // 最大下载速率(字节/秒)
+
+    // 上传相关特征
+    UploadTotal             float64 // 上传流量(字节)
+    HistoryUploadTotal      float64 // 历史上传流量(字节)
+    MaxuploadRate           float64 // 最大上传速率(字节/秒)
+    HistoryMaxUploadRate    float64 // 历史最大上传速率(字节/秒)
+
+    // 下载相关特征
+    DownloadTotal           float64 // 下载流量(字节)
+    HistoryDownloadTotal    float64 // 历史下载流量(字节)
+    MaxdownloadRate         float64 // 最大下载速率(字节/秒)
+    HistoryMaxDownloadRate  float64 // 历史最大下载速率(字节/秒)
+
     ConnectionDuration float64 // 连接持续时间(毫秒)
     LastUsed        int64   // 上次使用时间
-    
+
     // 连接特征
     IsUDP           bool    // 是否UDP连接
     IsTCP           bool    // 是否TCP连接
-    
+
     // 元数据特征
     DestIPASN       string  // 目标IP的ASN信息
     Host            string  // 域名信息
@@ -640,7 +649,7 @@ func prepareFeatures(input *ModelInput) []float64 {
 
     features := make([]float64, 0, MaxFeatureSize)
     
-    // 1. 节点性能指标 - 基础特征
+    // 1. 最后使用时间间隔
     uploadMB := input.UploadTotal
     downloadMB := input.DownloadTotal
     maxUploadRateKB := input.MaxuploadRate
@@ -656,10 +665,14 @@ func prepareFeatures(input *ModelInput) []float64 {
     features = append(features, float64(input.Failure))                  // 失败次数
     features = append(features, math.Log1p(float64(input.ConnectTime)))  // 连接时间（对数变换）
     features = append(features, math.Log1p(float64(input.Latency)))      // 延迟（对数变换）
-    features = append(features, math.Log1p(uploadMB))                    // 上传流量MB（对数变换）
-    features = append(features, math.Log1p(downloadMB))                  // 下载流量MB（对数变换）
-    features = append(features, math.Log1p(maxUploadRateKB))              // 最大上传速率KB/s（对数变换）
-    features = append(features, math.Log1p(maxDownloadRateKB))            // 最大下载速率KB/s（对数变换）
+    features = append(features, math.Log1p(uploadMB))                    // 上传流量MB
+    features = append(features, math.Log1p(input.HistoryUploadTotal))    // 历史上传流量
+    features = append(features, math.Log1p(maxUploadRateKB))             // 最大上传速率
+    features = append(features, math.Log1p(input.HistoryMaxUploadRate))  // 历史最大上传速率
+    features = append(features, math.Log1p(downloadMB))                  // 下载流量MB
+    features = append(features, math.Log1p(input.HistoryDownloadTotal))  // 历史下载流量
+    features = append(features, math.Log1p(maxDownloadRateKB))           // 最大下载速率
+    features = append(features, math.Log1p(input.HistoryMaxDownloadRate))// 历史最大下载速率
     features = append(features, math.Log1p(durationMinutes))             // 连接持续时间分钟（对数变换）
     features = append(features, math.Log1p(lastUsedSeconds))             // 上次使用至今秒数（对数变换）
     
@@ -1024,23 +1037,32 @@ func boolToFloat(b bool) float64 {
     return 0.0
 }
 
-func CreateModelInputFromStats(success, failure, connectTime, latency int64, 
-    isUDP bool, isTCP bool, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration float64,
-    lastUsed int64, metadata *C.Metadata) *ModelInput {
-    
+func CreateModelInputFromStats(
+    success, failure, connectTime, latency int64,
+    uploadTotal, historyUploadTotal, maxUploadRate, historyMaxUploadRate float64,
+    downloadTotal, historyDownloadTotal, maxDownloadRate, historyMaxDownloadRate float64,
+    connectionDuration float64,
+    lastUsed int64,
+    isUDP bool, isTCP bool,
+    metadata *C.Metadata,
+) *ModelInput {
     var input = &ModelInput{
-        Success:           success,
-        Failure:           failure,
-        ConnectTime:       connectTime,
-        Latency:           latency,
-        UploadTotal:       uploadTotal,
-        DownloadTotal:     downloadTotal,
-        MaxuploadRate:     maxUploadRate,
-        MaxdownloadRate:   maxDownloadRate,
-        ConnectionDuration: connectionDuration,
-        LastUsed:          lastUsed,
-        IsUDP:             isUDP,
-        IsTCP:             isTCP,
+        Success:               success,
+        Failure:               failure,
+        ConnectTime:           connectTime,
+        Latency:               latency,
+        UploadTotal:           uploadTotal,
+        HistoryUploadTotal:    historyUploadTotal,
+        MaxuploadRate:         maxUploadRate,
+        HistoryMaxUploadRate:  historyMaxUploadRate,
+        DownloadTotal:         downloadTotal,
+        HistoryDownloadTotal:  historyDownloadTotal,
+        MaxdownloadRate:       maxDownloadRate,
+        HistoryMaxDownloadRate: historyMaxDownloadRate,
+        ConnectionDuration:    connectionDuration,
+        LastUsed:              lastUsed,
+        IsUDP:                 isUDP,
+        IsTCP:                 isTCP,
     }
 
     if metadata != nil {
@@ -1052,30 +1074,35 @@ func CreateModelInputFromStats(success, failure, connectTime, latency int64,
         input.DestPort = metadata.DstPort
         input.DestGeoIP = metadata.DstGeoIP
     }
-    
+
     return input
 }
 
-func CreateModelInputFromStatsRecord(record *smart.StatsRecord, metadata *C.Metadata, 
-    uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate float64) *ModelInput {
-    
+func CreateModelInputFromStatsRecord(
+    record *smart.StatsRecord, metadata *C.Metadata,
+    uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate float64,
+) *ModelInput {
     if record == nil || metadata == nil {
         return nil
     }
-    
+
     return CreateModelInputFromStats(
         int64(record.Success),
         int64(record.Failure),
         record.ConnectTime,
         record.Latency,
-        metadata.NetWork == C.UDP,
-        metadata.NetWork == C.TCP,
         uploadTotal,
-        downloadTotal,
+        record.UploadTotal,
         maxUploadRate,
+        record.MaxUploadRate,
+        downloadTotal,
+        record.DownloadTotal,
         maxDownloadRate,
+        record.MaxDownloadRate,
         record.ConnectionDuration,
         record.LastUsed.Unix(),
+        metadata.NetWork == C.UDP,
+        metadata.NetWork == C.TCP,
         metadata,
     )
 }
