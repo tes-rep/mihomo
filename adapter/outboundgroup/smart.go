@@ -181,7 +181,20 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
         for i := 0; i < maxRetries; i++ {
             c, err := proxy.DialContext(ctx, metadata)
             if err == nil {
-                return s.wrapConnWithMetric(c, proxy, metadata, 0), nil
+                wrappedConn, wrapErr := s.wrapConnWithMetric(c, proxy, metadata, 0)
+                if wrapErr != nil {
+                    c.Close()
+                    if i == maxRetries-1 {
+                        break
+                    }
+                    proxy = s.selectNextProxy(metadata, proxies, triedProxies)
+                    if proxy == nil {
+                        break
+                    }
+                    triedProxies[proxy.Name()] = true
+                    continue
+                }
+                return wrappedConn, nil
             }
 
             if i == maxRetries-1 {
@@ -215,7 +228,29 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 
         if err == nil {
             if s.store != nil {
-                return s.wrapConnWithMetric(c, proxy, metadata, connectTime), nil
+                wrappedConn, wrapErr := s.wrapConnWithMetric(c, proxy, metadata, connectTime)
+                if wrapErr != nil {
+                    c.Close()
+                    finalErr = wrapErr
+                    
+                    s.recordConnectionStats("failed", metadata, proxy, 0, 0, 0, 0, 0, 0, 0, false, wrapErr)
+                    
+                    if i == maxRetries-1 {
+                        domain := smart.GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
+                        if domain != "" {
+                            s.store.MarkConnectionFailed(s.Name(), s.configName, domain)
+                        }
+                        break
+                    }
+                    
+                    triedProxies[proxy.Name()] = true
+                    proxy = s.selectNextProxy(metadata, proxies, triedProxies)
+                    if proxy == nil {
+                        break
+                    }
+                    continue
+                }
+                return wrappedConn, nil
             }
             c.AppendToChains(s)
             return c, nil
@@ -247,29 +282,41 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 }
 
 func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (pc C.PacketConn, err error) {
-    proxy := s.selectProxy(metadata, true)
-    if proxy == nil {
+    proxies := s.GetProxies(true)
+    if len(proxies) == 0 {
         return nil, errors.New("no proxy available")
     }
-
-    start := time.Now()
-    pc, err = proxy.ListenPacketContext(ctx, metadata)
-
-    if err == nil {
-        pc.AppendToChains(s)
+    triedProxies := make(map[string]bool)
+    proxy := s.selectProxy(metadata, false)
+    if proxy == nil {
+        proxy = proxies[0]
     }
+    triedProxies[proxy.Name()] = true
 
-    if s.store != nil {
-        if err != nil {
+    var finalErr error
+    for i := 0; i < maxRetries; i++ {
+        start := time.Now()
+        pc, err = proxy.ListenPacketContext(ctx, metadata)
+        if err == nil {
+            pc.AppendToChains(s)
+            if s.store != nil {
+                connectTime := time.Since(start).Milliseconds()
+                s.recordConnectionStats("success", metadata, proxy, connectTime, 0, 0, 0, 0, 0, 0, false, nil)
+                pc = s.registerPacketClosureMetricsCallback(pc, proxy, metadata)
+            }
+            return pc, nil
+        }
+        finalErr = err
+        if s.store != nil {
             s.recordConnectionStats("failed", metadata, proxy, 0, 0, 0, 0, 0, 0, 0, false, err)
-        } else {
-            connectTime := time.Since(start).Milliseconds()
-            s.recordConnectionStats("success", metadata, proxy, connectTime, 0, 0, 0, 0, 0, 0, false, nil)
-            pc = s.registerPacketClosureMetricsCallback(pc, proxy, metadata)
+        }
+        triedProxies[proxy.Name()] = true
+        proxy = s.selectNextProxy(metadata, proxies, triedProxies)
+        if proxy == nil {
+            break
         }
     }
-
-    return
+    return nil, finalErr
 }
 
 func (s *Smart) Unwrap(metadata *C.Metadata, touch bool) C.Proxy {
@@ -292,13 +339,13 @@ func (s *Smart) IsL3Protocol(metadata *C.Metadata) bool {
 	return s.Unwrap(metadata, false).IsL3Protocol(metadata)
 }
 
-func (s *Smart) wrapConnWithMetric(c C.Conn, proxy C.Proxy, metadata *C.Metadata, connectTime int64) C.Conn {
+func (s *Smart) wrapConnWithMetric(c C.Conn, proxy C.Proxy, metadata *C.Metadata, connectTime int64) (C.Conn, error) {
     c.AppendToChains(s)
     c = s.registerClosureMetricsCallback(c, proxy, metadata)
 
     start := time.Now()
 
-    return callback.NewFirstWriteCallBackConn(c, func(err error) {
+    wrappedConn := callback.NewFirstWriteCallBackConn(c, func(err error) {
         latency := time.Since(start).Milliseconds()
         if err == nil {
             s.recordConnectionStats("success", metadata, proxy, connectTime, latency, 0, 0, 0, 0, 0, false, nil)
@@ -306,6 +353,8 @@ func (s *Smart) wrapConnWithMetric(c C.Conn, proxy C.Proxy, metadata *C.Metadata
             s.recordConnectionStats("failed", metadata, proxy, 0, 0, 0, 0, 0, 0, 0, false, err)
         }
     })
+    
+    return wrappedConn, nil
 }
 
 func (s *Smart) Set(name string) error {
@@ -480,7 +529,7 @@ func (s *Smart) updateNodeRanking() {
 
 	log.Debugln("[Smart] Starting node ranking update for policy group [%s]", s.Name())
 
-    proxies := s.GetProxies(false)
+    proxies := s.GetProxies(true)
     proxyNames := make([]string, 0, len(proxies))
     for _, p := range proxies {
         proxyNames = append(proxyNames, p.Name())
@@ -769,7 +818,7 @@ func (s *Smart) fallbackToRoundRobin(metadata *C.Metadata, proxies []C.Proxy) C.
 	}
 
 	if s.fallback != nil {
-		proxy := s.fallback.Unwrap(metadata, true)
+		proxy := s.fallback.Unwrap(metadata, false)
 		if proxy != nil {
 			return proxy
 		}
