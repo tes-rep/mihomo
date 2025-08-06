@@ -27,6 +27,7 @@ type AtomicStatsRecord struct {
     connectTime atomic.Int64
     latency     atomic.Int64
     lastUsed    atomic.Int64
+    status      atomic.Int64
 
     weights         atomic.TypedValue[map[string]float64]
     uploadTotal     atomic.Float64
@@ -98,6 +99,7 @@ func (m *AtomicRecordManager) GetOrCreateAtomicRecord(cacheKey string, store *St
     record := &AtomicStatsRecord{}
     record.weights.Store(make(map[string]float64))
     record.lastUsed.Store(time.Now().Unix())
+    record.status.Store(0)
 
     if store != nil {
         if existingData, err := store.GetStatsForDomain(groupName, configName, domain); err == nil {
@@ -175,6 +177,8 @@ func (r *AtomicStatsRecord) Get(field string) interface{} {
         return r.maxDownloadRate.Load()
     case "duration":
         return r.duration.Load()
+    case "status":
+        return r.status.Load()
     default:
         return nil
     }
@@ -201,6 +205,10 @@ func (r *AtomicStatsRecord) Set(field string, value interface{}) {
     case "lastUsed":
         if v, ok := value.(int64); ok {
             r.lastUsed.Store(v)
+        }
+    case "status":
+        if v, ok := value.(int64); ok {
+            r.status.Store(v)
         }
     case "uploadTotal":
         if v, ok := value.(float64); ok {

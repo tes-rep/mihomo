@@ -318,3 +318,48 @@ func urlToMetadata(rawURL string) (addr C.Metadata, err error) {
 	err = addr.SetRemoteAddress(net.JoinHostPort(u.Hostname(), port))
 	return
 }
+
+func (p *Proxy) StatusTest(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16]) (status uint16, ok bool, err error) {
+    addr, err := urlToMetadata(url)
+    if err != nil {
+        return 0, false, err
+    }
+
+    instance, err := p.DialContext(ctx, &addr)
+    if err != nil {
+        return 0, false, err
+    }
+    defer instance.Close()
+
+    req, err := http.NewRequest(http.MethodHead, url, nil)
+    if err != nil {
+        return 0, false, err
+    }
+    req = req.WithContext(ctx)
+
+    transport := &http.Transport{
+        DialContext: func(context.Context, string, string) (net.Conn, error) {
+            return instance, nil
+        },
+        TLSClientConfig: ca.GetGlobalTLSConfig(&tls.Config{}),
+    }
+
+    client := http.Client{
+        Timeout:   30 * time.Second,
+        Transport: transport,
+        CheckRedirect: func(req *http.Request, via []*http.Request) error {
+            return http.ErrUseLastResponse
+        },
+    }
+    defer client.CloseIdleConnections()
+
+    resp, err := client.Do(req)
+    if err != nil {
+        return 0, false, err
+    }
+    defer resp.Body.Close()
+
+    status = uint16(resp.StatusCode)
+    ok = expectedStatus == nil || expectedStatus.Check(status)
+    return status, ok, nil
+}

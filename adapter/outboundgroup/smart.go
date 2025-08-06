@@ -939,20 +939,45 @@ func (s *Smart) cleanupOrphanedNodeCache() {
 }
 
 func (s *Smart) checkNodeQualityDegradation(
+    metadata *C.Metadata, proxy C.Proxy, atomicRecord *smart.AtomicStatsRecord,
     domain, proxyName string,
     newWeight, oldWeight float64,
     connectionDuration int64,
     uploadTotal, downloadTotal float64,
     maxUploadRateKB, maxDownloadRateKB, historyMaxUploadRateKB, historyMaxDownloadRateKB float64,
     historyUploadTotal, historyDownloadTotal float64,
-    success int64, weightType string) (float64, bool) {
+    success int64, weightType string, lastStatus int64) (float64, bool) {
     
     // 零流量连接
     if connectionDuration > 1000 && downloadTotal == 0 && uploadTotal == 0 {
-        degradedWeight := newWeight * 0.3
+        degradedWeight := math.Max(0.1, newWeight * 0.3)
         log.Debugln("[Smart] Zero-traffic connection detected: [%s] for domain [%s], conn time: %dms, forcing weight degradation from %.4f to %.4f (%s)",
             proxyName, domain, connectionDuration, newWeight, degradedWeight, weightType)
         return degradedWeight, true
+    }
+
+    // 低流量连接检查异常状态码
+    if downloadTotal < 0.01 && metadata != nil && metadata.Host != "" && metadata.DstPort == 443 && metadata.NetWork == C.TCP {
+        needTest := false
+        if lastStatus == 0 {
+            needTest = true
+        } else if rand.Float64() < 0.3 {
+            needTest = true
+        }
+        if needTest {
+            expectedStatus, _ := utils.NewUnsignedRanges[uint16]("200-299")
+            ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+            defer cancel()
+            url := "https://" + metadata.Host + "/"
+            status, ok, err := proxy.StatusTest(ctx, url, expectedStatus)
+            atomicRecord.Set("status", int64(status))
+            if err == nil && (!ok && (status == 403 || status == 429 || status == 407)) {
+                degradedWeight := math.Max(0.1, newWeight * 0.3)
+                log.Debugln("[Smart] HTTPS connection detected abnormal response [%d], [%s] for domain [%s], degrade weight from %.4f to %.4f (%s)",
+                    status, proxyName, metadata.Host, newWeight, degradedWeight, weightType)
+                return degradedWeight, true
+            }
+        }
     }
 
     // 权重显著下降
@@ -1452,12 +1477,15 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
             historyUploadTotal := atomicRecord.Get("uploadTotal").(float64)
             historyDownloadTotal := atomicRecord.Get("downloadTotal").(float64)
             success := atomicRecord.Get("success").(int64)
+            status := atomicRecord.Get("status").(int64)
             
             degradedWeight, isDegraded = s.checkNodeQualityDegradation(
+                metadata, proxy, atomicRecord,
                 domain, proxy.Name(), calculatedWeight, oldWeight,
                 connectionDuration, uploadTotalMB, downloadTotalMB,
                 maxUploadRateKB, maxDownloadRateKB, historyMaxUploadRateKB, historyMaxDownloadRateKB,
-                historyUploadTotal, historyDownloadTotal, success, weightType)
+                historyUploadTotal, historyDownloadTotal, success, weightType,
+                status)
         }
     }
 
