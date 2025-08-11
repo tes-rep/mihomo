@@ -938,7 +938,7 @@ func (s *Smart) checkNodeQualityDegradation(
         needTest := false
         cooldownSeconds := int64(300)
         now := time.Now().Unix()
-        if lastStatus == 0 {
+        if lastStatus == 0 || lastStatus == 403 || lastStatus == 429 || lastStatus == 407 {
             if now-lastUsedVal > cooldownSeconds {
                 needTest = true
             }
