@@ -7,6 +7,7 @@ import (
 
 	"github.com/metacubex/mihomo/adapter/outbound"
 	"github.com/metacubex/mihomo/listener/inbound"
+	"github.com/metacubex/mihomo/transport/vless/encryption"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -84,6 +85,32 @@ func TestInboundVless_TLS(t *testing.T) {
 			outboundOptions.Flow = "xtls-rprx-vision"
 			testInboundVless(t, inboundOptions, outboundOptions)
 		})
+	})
+}
+
+func TestInboundVless_Encryption(t *testing.T) {
+	seedBase64, clientBase64, err := encryption.GenMLKEM768("")
+	if err != nil {
+		t.Fatal(err)
+		return
+	}
+	t.Run("-vless-", func(t *testing.T) {
+		inboundOptions := inbound.VlessOption{
+			Decryption: "10min-vless-mlkem768seed-" + seedBase64,
+		}
+		outboundOptions := outbound.VlessOption{
+			Encryption: "8min-vless-mlkem768client-" + clientBase64,
+		}
+		testInboundVless(t, inboundOptions, outboundOptions)
+	})
+	t.Run("-aes128xor-", func(t *testing.T) {
+		inboundOptions := inbound.VlessOption{
+			Decryption: "10min-aes128xor-mlkem768seed-" + seedBase64,
+		}
+		outboundOptions := outbound.VlessOption{
+			Encryption: "8min-aes128xor-mlkem768client-" + clientBase64,
+		}
+		testInboundVless(t, inboundOptions, outboundOptions)
 	})
 }
 
