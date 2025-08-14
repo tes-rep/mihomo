@@ -2,8 +2,8 @@ package atomic
 
 import (
 	"encoding/json"
-	"math"
 	"sync/atomic"
+	"math"
 )
 
 type TypedValue[T any] struct {
@@ -83,15 +83,10 @@ func NewTypedValue[T any](t T) (v TypedValue[T]) {
 	return
 }
 
-type noCopy struct{}
-
-// Lock is a no-op used by -copylocks checker from `go vet`.
-func (*noCopy) Lock()   {}
-func (*noCopy) Unlock() {}
-
 // TypedValue[map[K]V]
 func (t *TypedValue[T]) Update(f func(old T) (new T)) {
-    switch any(DefaultValue[T]()).(type) {
+    var zero T
+    switch any(zero).(type) {
     case map[string]float64:
         old := t.Load()
         new := f(old)
@@ -109,7 +104,7 @@ func (t *TypedValue[T]) Update(f func(old T) (new T)) {
 
 func CloneMap[K comparable, V any](m map[K]V) map[K]V {
     if m == nil {
-        return make(map[K]V)
+        return nil
     }
     newMap := make(map[K]V, len(m))
     for k, v := range m {
