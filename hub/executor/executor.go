@@ -25,11 +25,11 @@ import (
 	"github.com/metacubex/mihomo/component/profile/cachefile"
 	"github.com/metacubex/mihomo/component/resolver"
 	"github.com/metacubex/mihomo/component/resource"
+	"github.com/metacubex/mihomo/component/smart/lightgbm"
 	"github.com/metacubex/mihomo/component/sniffer"
 	tlsC "github.com/metacubex/mihomo/component/tls"
 	"github.com/metacubex/mihomo/component/trie"
 	"github.com/metacubex/mihomo/component/updater"
-	"github.com/metacubex/mihomo/component/smart/lightgbm"
 	"github.com/metacubex/mihomo/config"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/constant/provider"
@@ -122,7 +122,7 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	runtime.GC()
 	tunnel.OnRunning()
 	updateUpdater(cfg)
-	
+
 	resolver.ResetConnection()
 }
 
@@ -537,25 +537,25 @@ func updateIPTables(cfg *config.Config) {
 }
 
 func initializeSmartGroups(proxies map[string]C.Proxy) {
-    for _, proxy := range proxies {
-        if proxy.Type() == C.Smart {
-            if smart, ok := proxy.Adapter().(*outboundgroup.Smart); ok {
-                log.Infoln("[Smart] Initializing Smart Group: %s", proxy.Name())
-                smart.InitializeCache()
-            }
-        }
-    }
+	for _, proxy := range proxies {
+		if proxy.Type() == C.Smart {
+			if smart, ok := proxy.Adapter().(*outboundgroup.Smart); ok {
+				log.Infoln("[Smart] Initializing Smart Group: %s", proxy.Name())
+				smart.InitializeCache()
+			}
+		}
+	}
 }
 
 func closeSmartGroups() {
-    for _, proxy := range tunnel.Proxies() {
-        if proxy.Type() == C.Smart {
-            adapter := proxy.Adapter()
-            if smart, ok := adapter.(*outboundgroup.Smart); ok {
-                smart.Close()
-            }
-        }
-    }
+	for _, proxy := range tunnel.Proxies() {
+		if proxy.Type() == C.Smart {
+			adapter := proxy.Adapter()
+			if smart, ok := adapter.(*outboundgroup.Smart); ok {
+				smart.Close()
+			}
+		}
+	}
 }
 
 func Shutdown() {

@@ -12,10 +12,10 @@ import (
 	"time"
 
 	"github.com/metacubex/mihomo/common/atomic"
+	"github.com/metacubex/mihomo/common/convert"
 	"github.com/metacubex/mihomo/common/queue"
 	"github.com/metacubex/mihomo/common/utils"
 	"github.com/metacubex/mihomo/common/xsync"
-	"github.com/metacubex/mihomo/common/convert"
 	"github.com/metacubex/mihomo/component/ca"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
@@ -321,45 +321,45 @@ func urlToMetadata(rawURL string) (addr C.Metadata, err error) {
 }
 
 func (p *Proxy) StatusTest(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16]) (status uint16, ok bool, err error) {
-    addr, err := urlToMetadata(url)
-    if err != nil {
-        return 0, false, err
-    }
+	addr, err := urlToMetadata(url)
+	if err != nil {
+		return 0, false, err
+	}
 
-    transport := &http.Transport{
-        DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-            return p.DialContext(ctx, &addr)
-        },
-        MaxIdleConns:          100,
-        IdleConnTimeout:       10 * time.Second,
-        TLSHandshakeTimeout:   10 * time.Second,
-        ExpectContinueTimeout: 1 * time.Second,
-        TLSClientConfig:       ca.GetGlobalTLSConfig(&tls.Config{}),
-    }
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			return p.DialContext(ctx, &addr)
+		},
+		MaxIdleConns:          100,
+		IdleConnTimeout:       10 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		TLSClientConfig:       ca.GetGlobalTLSConfig(&tls.Config{}),
+	}
 
-    client := http.Client{
-        Timeout:   10 * time.Second,
-        Transport: transport,
-        CheckRedirect: func(req *http.Request, via []*http.Request) error {
-            return http.ErrUseLastResponse
-        },
-    }
-    defer client.CloseIdleConnections()
+	client := http.Client{
+		Timeout:   10 * time.Second,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	defer client.CloseIdleConnections()
 
-    req, err := http.NewRequest(http.MethodHead, url, nil)
-    if err != nil {
-        return 0, false, err
-    }
-    req = req.WithContext(ctx)
-    req.Header.Set("User-Agent", convert.RandUserAgent())
+	req, err := http.NewRequest(http.MethodHead, url, nil)
+	if err != nil {
+		return 0, false, err
+	}
+	req = req.WithContext(ctx)
+	req.Header.Set("User-Agent", convert.RandUserAgent())
 
-    resp, err := client.Do(req)
-    if err != nil {
-        return 0, false, err
-    }
-    defer resp.Body.Close()
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, false, err
+	}
+	defer resp.Body.Close()
 
-    status = uint16(resp.StatusCode)
-    ok = expectedStatus == nil || expectedStatus.Check(status)
-    return status, ok, nil
+	status = uint16(resp.StatusCode)
+	ok = expectedStatus == nil || expectedStatus.Check(status)
+	return status, ok, nil
 }

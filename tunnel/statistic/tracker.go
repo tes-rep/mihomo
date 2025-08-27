@@ -3,8 +3,8 @@ package statistic
 import (
 	"io"
 	"net"
-	"time"
 	"sync"
+	"time"
 
 	"github.com/metacubex/mihomo/common/atomic"
 	"github.com/metacubex/mihomo/common/buf"
@@ -28,12 +28,11 @@ type timeBucket struct {
 }
 
 type bucketWindow struct {
-	buckets   []timeBucket
-	interval  int64
-	windowMs  int64
-	mu        sync.Mutex
+	buckets  []timeBucket
+	interval int64
+	windowMs int64
+	mu       sync.Mutex
 }
-
 
 type TrackerInfo struct {
 	UUID            uuid.UUID    `json:"id"`
@@ -49,11 +48,11 @@ type TrackerInfo struct {
 }
 
 type tcpTracker struct {
-	C.Conn             `json:"-"`
+	C.Conn `json:"-"`
 	*TrackerInfo
-	manager            *Manager
+	manager *Manager
 
-	pushToManager      bool `json:"-"`
+	pushToManager bool `json:"-"`
 
 	uploadBucketWindow   *bucketWindow
 	downloadBucketWindow *bucketWindow
@@ -145,25 +144,25 @@ func NewTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.R
 	metadata.RemoteDst = conn.RemoteDestination()
 
 	trackerUUID := utils.NewUUIDV4()
-    
+
 	metadata.UUID = trackerUUID.String()
 
 	t := &tcpTracker{
-        Conn:    conn,
-        manager: manager,
-        TrackerInfo: &TrackerInfo{
-            UUID:          trackerUUID,
-            Start:         time.Now(),
-            Metadata:      metadata,
-            Chain:         conn.Chains(),
-            Rule:          "",
-            UploadTotal:   atomic.NewInt64(uploadTotal),
-            DownloadTotal: atomic.NewInt64(downloadTotal),
-        },
-        pushToManager: pushToManager,
+		Conn:    conn,
+		manager: manager,
+		TrackerInfo: &TrackerInfo{
+			UUID:          trackerUUID,
+			Start:         time.Now(),
+			Metadata:      metadata,
+			Chain:         conn.Chains(),
+			Rule:          "",
+			UploadTotal:   atomic.NewInt64(uploadTotal),
+			DownloadTotal: atomic.NewInt64(downloadTotal),
+		},
+		pushToManager:        pushToManager,
 		uploadBucketWindow:   newBucketWindow(10, 100),
 		downloadBucketWindow: newBucketWindow(10, 100),
-    }
+	}
 
 	if pushToManager {
 		if uploadTotal > 0 {
@@ -184,11 +183,11 @@ func NewTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.R
 }
 
 type udpTracker struct {
-	C.PacketConn     `json:"-"`
+	C.PacketConn `json:"-"`
 	*TrackerInfo
-	manager          *Manager
+	manager *Manager
 
-	pushToManager    bool `json:"-"`
+	pushToManager bool `json:"-"`
 
 	uploadBucketWindow   *bucketWindow
 	downloadBucketWindow *bucketWindow
@@ -249,22 +248,22 @@ func NewUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, ru
 	metadata.RemoteDst = conn.RemoteDestination()
 
 	trackerUUID := utils.NewUUIDV4()
-    
+
 	metadata.UUID = trackerUUID.String()
 
 	ut := &udpTracker{
-    	PacketConn: conn,
-    	manager:    manager,
-    	TrackerInfo: &TrackerInfo{
-    		UUID:          trackerUUID,
-    		Start:         time.Now(),
-    		Metadata:      metadata,
-    		Chain:         conn.Chains(),
-    		Rule:          "",
-    		UploadTotal:   atomic.NewInt64(uploadTotal),
-    		DownloadTotal: atomic.NewInt64(downloadTotal),
+		PacketConn: conn,
+		manager:    manager,
+		TrackerInfo: &TrackerInfo{
+			UUID:          trackerUUID,
+			Start:         time.Now(),
+			Metadata:      metadata,
+			Chain:         conn.Chains(),
+			Rule:          "",
+			UploadTotal:   atomic.NewInt64(uploadTotal),
+			DownloadTotal: atomic.NewInt64(downloadTotal),
 		},
-		pushToManager: pushToManager,
+		pushToManager:        pushToManager,
 		uploadBucketWindow:   newBucketWindow(10, 100),
 		downloadBucketWindow: newBucketWindow(10, 100),
 	}
@@ -288,35 +287,35 @@ func NewUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, ru
 }
 
 func newBucketWindow(bucketCount int, intervalMs int64) *bucketWindow {
-    return &bucketWindow{
-        buckets:  make([]timeBucket, bucketCount),
-        interval: intervalMs,
-        windowMs: intervalMs * int64(bucketCount),
-    }
+	return &bucketWindow{
+		buckets:  make([]timeBucket, bucketCount),
+		interval: intervalMs,
+		windowMs: intervalMs * int64(bucketCount),
+	}
 }
 
 func (w *bucketWindow) updateMaxRate(bytes int64) int64 {
-    w.mu.Lock()
-    nowMs := time.Now().UnixNano() / 1e6
-    idx := int((nowMs / w.interval) % int64(len(w.buckets)))
-    bucketStart := (nowMs / w.interval) * w.interval
-    if w.buckets[idx].startMs != bucketStart {
-        w.buckets[idx].startMs = bucketStart
-        w.buckets[idx].bytes = 0
-    }
-    w.buckets[idx].bytes += bytes
+	w.mu.Lock()
+	nowMs := time.Now().UnixNano() / 1e6
+	idx := int((nowMs / w.interval) % int64(len(w.buckets)))
+	bucketStart := (nowMs / w.interval) * w.interval
+	if w.buckets[idx].startMs != bucketStart {
+		w.buckets[idx].startMs = bucketStart
+		w.buckets[idx].bytes = 0
+	}
+	w.buckets[idx].bytes += bytes
 
-    now := nowMs
-    windowStart := now - w.windowMs
-    maxRate := int64(0)
-    for _, b := range w.buckets {
-        if b.startMs >= windowStart && b.bytes > 0 {
-            rate := int64(float64(b.bytes) * 1000 / float64(w.interval))
-            if rate > maxRate {
-                maxRate = rate
-            }
-        }
-    }
-    w.mu.Unlock()
-    return maxRate
+	now := nowMs
+	windowStart := now - w.windowMs
+	maxRate := int64(0)
+	for _, b := range w.buckets {
+		if b.startMs >= windowStart && b.bytes > 0 {
+			rate := int64(float64(b.bytes) * 1000 / float64(w.interval))
+			if rate > maxRate {
+				maxRate = rate
+			}
+		}
+	}
+	w.mu.Unlock()
+	return maxRate
 }

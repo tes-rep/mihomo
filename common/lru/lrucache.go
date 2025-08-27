@@ -3,9 +3,9 @@ package lru
 // Modified by https://github.com/die-net/lrucache
 
 import (
+	"strings"
 	"sync"
 	"time"
-	"strings"
 
 	list "github.com/bahlo/generic-list-go"
 	"github.com/samber/lo"
@@ -291,7 +291,6 @@ type entry[K comparable, V any] struct {
 	expires int64
 }
 
-
 func (c *LruCache[K, V]) FilterByKeyPrefix(prefix string) map[string]V {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -303,7 +302,7 @@ func (c *LruCache[K, V]) FilterByKeyPrefix(prefix string) map[string]V {
 		if !ok {
 			continue
 		}
-		
+
 		if strings.HasPrefix(keyStr, prefix) {
 			e := le.Value
 			result[keyStr] = e.value
@@ -325,7 +324,7 @@ func (c *LruCache[K, V]) RemoveByKeyPrefix(prefix string) int {
 		if !ok {
 			continue
 		}
-		
+
 		if strings.HasPrefix(keyStr, prefix) {
 			keysToRemove = append(keysToRemove, k)
 		}

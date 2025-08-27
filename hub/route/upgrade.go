@@ -75,7 +75,7 @@ func updateLgbmModel(w http.ResponseWriter, r *http.Request) {
 		render.Status(r, http.StatusInternalServerError)
 		render.JSON(w, r, newError(fmt.Sprintf("%s", err)))
 		return
-    }
+	}
 
 	render.JSON(w, r, render.M{"status": "ok"})
 	if f, ok := w.(http.Flusher); ok {

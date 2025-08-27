@@ -15,10 +15,10 @@ import (
 const Name = "mihomo"
 
 var (
-	GeositeName = "GeoSite.dat"
-	GeoipName   = "GeoIP.dat"
-	ASNName     = "ASN.mmdb"
-	SmartmodelName   = "Model.bin"
+	GeositeName    = "GeoSite.dat"
+	GeoipName      = "GeoIP.dat"
+	ASNName        = "ASN.mmdb"
+	SmartmodelName = "Model.bin"
 )
 
 // Path is used to get the configuration path

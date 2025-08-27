@@ -22,9 +22,9 @@ import (
 	"github.com/metacubex/mihomo/component/geodata"
 	P "github.com/metacubex/mihomo/component/process"
 	"github.com/metacubex/mihomo/component/resolver"
+	"github.com/metacubex/mihomo/component/smart/lightgbm"
 	"github.com/metacubex/mihomo/component/sniffer"
 	"github.com/metacubex/mihomo/component/trie"
-	"github.com/metacubex/mihomo/component/smart/lightgbm"
 	C "github.com/metacubex/mihomo/constant"
 	providerTypes "github.com/metacubex/mihomo/constant/provider"
 	snifferTypes "github.com/metacubex/mihomo/constant/sniffer"
@@ -339,8 +339,8 @@ type RawExperimental struct {
 }
 
 type RawProfile struct {
-	StoreSelected      bool  `yaml:"store-selected" json:"store-selected"`
-	StoreFakeIP        bool  `yaml:"store-fake-ip" json:"store-fake-ip"`
+	StoreSelected      bool    `yaml:"store-selected" json:"store-selected"`
+	StoreFakeIP        bool    `yaml:"store-fake-ip" json:"store-fake-ip"`
 	SmartCollectorSize float64 `yaml:"smart-collector-size" json:"smart-collector-size"`
 }
 
@@ -462,29 +462,29 @@ func Parse(buf []byte) (*Config, error) {
 
 func DefaultRawConfig() *RawConfig {
 	return &RawConfig{
-		AllowLan:          false,
-		BindAddress:       "*",
-		LanAllowedIPs:     []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0"), netip.MustParsePrefix("::/0")},
-		IPv6:              true,
-		Mode:              T.Rule,
-		GeoAutoUpdate:     false,
-		GeoUpdateInterval: 24,
-		LgbmAutoUpdate:    false,
+		AllowLan:           false,
+		BindAddress:        "*",
+		LanAllowedIPs:      []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0"), netip.MustParsePrefix("::/0")},
+		IPv6:               true,
+		Mode:               T.Rule,
+		GeoAutoUpdate:      false,
+		GeoUpdateInterval:  24,
+		LgbmAutoUpdate:     false,
 		LgbmUpdateInterval: 72,
-		LgbmUrl:           lightgbm.GetModelDownloadURL(),
-		GeodataMode:       geodata.GeodataMode(),
-		GeodataLoader:     "memconservative",
-		UnifiedDelay:      false,
-		Authentication:    []string{},
-		LogLevel:          log.INFO,
-		Hosts:             map[string]any{},
-		Rule:              []string{},
-		Proxy:             []map[string]any{},
-		ProxyGroup:        []map[string]any{},
-		TCPConcurrent:     false,
-		FindProcessMode:   P.FindProcessStrict,
-		GlobalUA:          "clash.meta/" + C.Version,
-		ETagSupport:       true,
+		LgbmUrl:            lightgbm.GetModelDownloadURL(),
+		GeodataMode:        geodata.GeodataMode(),
+		GeodataLoader:      "memconservative",
+		UnifiedDelay:       false,
+		Authentication:     []string{},
+		LogLevel:           log.INFO,
+		Hosts:              map[string]any{},
+		Rule:               []string{},
+		Proxy:              []map[string]any{},
+		ProxyGroup:         []map[string]any{},
+		TCPConcurrent:      false,
+		FindProcessMode:    P.FindProcessStrict,
+		GlobalUA:           "clash.meta/" + C.Version,
+		ETagSupport:        true,
 		DNS: RawDNS{
 			Enable:         false,
 			IPv6:           false,

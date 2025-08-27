@@ -2,10 +2,10 @@ package route
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
-	"fmt"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/render"
@@ -14,8 +14,8 @@ import (
 	"github.com/metacubex/mihomo/common/utils"
 	"github.com/metacubex/mihomo/component/profile/cachefile"
 	C "github.com/metacubex/mihomo/constant"
-	"github.com/metacubex/mihomo/tunnel"
 	"github.com/metacubex/mihomo/log"
+	"github.com/metacubex/mihomo/tunnel"
 )
 
 func groupRouter() http.Handler {
@@ -104,30 +104,30 @@ func getGroupWeights(w http.ResponseWriter, r *http.Request) {
 		render.Status(r, http.StatusBadRequest)
 		render.JSON(w, r, render.M{
 			"weights": map[string]string{},
-			"error": fmt.Sprintf("Not a Smart group (actual type: %T)", proxy.Adapter()),
+			"error":   fmt.Sprintf("Not a Smart group (actual type: %T)", proxy.Adapter()),
 		})
 		return
 	}
-	
+
 	configName := smartGroup.GetConfigFilename()
 	groupName := smartGroup.Name()
-	
+
 	db := cachefile.Cache()
 	if db == nil {
 		render.Status(r, http.StatusServiceUnavailable)
 		render.JSON(w, r, render.M{
 			"weights": map[string]string{},
-			"error": "Cache not available",
+			"error":   "Cache not available",
 		})
 		return
 	}
-	
+
 	smartStore := cachefile.NewSmartStore(db)
 	if smartStore == nil {
 		render.Status(r, http.StatusServiceUnavailable)
 		render.JSON(w, r, render.M{
 			"weights": map[string]string{},
-			"error": "Smart cache not available",
+			"error":   "Smart cache not available",
 		})
 		return
 	}
@@ -146,7 +146,7 @@ func getGroupWeights(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	
+
 	weights, err := smartStore.GetStore().GetNodeWeightRanking(groupName, configName, true, proxyNames)
 
 	if err != nil {
@@ -154,11 +154,11 @@ func getGroupWeights(w http.ResponseWriter, r *http.Request) {
 		render.Status(r, http.StatusInternalServerError)
 		render.JSON(w, r, render.M{
 			"weights": map[string]string{},
-			"error": "Failed to get weight ranking: " + err.Error(),
+			"error":   "Failed to get weight ranking: " + err.Error(),
 		})
 		return
 	}
-	
+
 	if len(weights) == 0 {
 		log.Debugln("Policy group %s has no weight data", groupName)
 		render.JSON(w, r, render.M{
@@ -167,7 +167,7 @@ func getGroupWeights(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	
+
 	render.JSON(w, r, render.M{
 		"weights": weights,
 	})

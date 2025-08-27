@@ -3,8 +3,8 @@ package route
 import (
 	"net/http"
 
-	"github.com/metacubex/mihomo/component/resolver"
 	"github.com/metacubex/mihomo/component/profile/cachefile"
+	"github.com/metacubex/mihomo/component/resolver"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/render"
@@ -49,7 +49,7 @@ func flushAllSmartCache(w http.ResponseWriter, r *http.Request) {
 		render.JSON(w, r, newError(err.Error()))
 		return
 	}
-	
+
 	render.NoContent(w, r)
 }
 
@@ -67,14 +67,14 @@ func flushSmartConfigCache(w http.ResponseWriter, r *http.Request) {
 		render.JSON(w, r, newError("cache store not available"))
 		return
 	}
-	
+
 	smartStore := cachefile.NewSmartStore(db)
 	if smartStore == nil {
 		render.Status(r, http.StatusInternalServerError)
 		render.JSON(w, r, newError("smart store not available"))
 		return
 	}
-	
+
 	if err := smartStore.GetStore().FlushByConfig(configName); err != nil {
 		render.Status(r, http.StatusInternalServerError)
 		render.JSON(w, r, newError(err.Error()))
