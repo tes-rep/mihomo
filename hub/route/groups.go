@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+	"sync"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/render"
@@ -21,6 +22,7 @@ import (
 func groupRouter() http.Handler {
 	r := chi.NewRouter()
 	r.Get("/", getGroups)
+	r.Get("/weights", getAllGroupWeights)
 
 	r.Route("/{name}", func(r chi.Router) {
 		r.Use(parseProxyName, findProxyByName)
@@ -170,5 +172,99 @@ func getGroupWeights(w http.ResponseWriter, r *http.Request) {
 
 	render.JSON(w, r, render.M{
 		"weights": weights,
+	})
+}
+
+func getAllGroupWeights(w http.ResponseWriter, r *http.Request) {
+	db := cachefile.Cache()
+	if db == nil {
+		render.Status(r, http.StatusServiceUnavailable)
+		render.JSON(w, r, render.M{
+			"weights": map[string]map[string]string{},
+			"errors":  map[string]string{},
+			"error":   "Cache not available",
+		})
+		return
+	}
+
+	smartStore := cachefile.NewSmartStore(db)
+	if smartStore == nil {
+		render.Status(r, http.StatusServiceUnavailable)
+		render.JSON(w, r, render.M{
+			"weights": map[string]map[string]string{},
+			"errors":  map[string]string{},
+			"error":   "Smart cache not available",
+		})
+		return
+	}
+
+	result := make(map[string]map[string]string)
+	errorsMap := make(map[string]string)
+
+	var (
+		mu   sync.Mutex
+		wg   sync.WaitGroup
+		sem  = make(chan struct{}, 5)
+		store = smartStore.GetStore()
+	)
+
+	for _, p := range tunnel.Proxies() {
+		sg, ok := p.Adapter().(*outboundgroup.Smart)
+		if !ok {
+			continue
+		}
+
+		configName := sg.GetConfigFilename()
+		groupName := sg.Name()
+		proxies := sg.GetProxies(false)
+
+		proxyNames := make([]string, 0, len(proxies))
+		for _, pp := range proxies {
+			proxyNames = append(proxyNames, pp.Name())
+		}
+
+		if len(proxyNames) == 0 {
+			mu.Lock()
+			result[groupName] = map[string]string{}
+			mu.Unlock()
+			continue
+		}
+
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(groupName, configName string, proxyNames []string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			weights, err := store.GetNodeWeightRanking(groupName, configName, true, proxyNames)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				log.Warnln("[Smart] Failed to get weight ranking for group %s: %s", groupName, err.Error())
+				errorsMap[groupName] = err.Error()
+				return
+			}
+			if len(weights) == 0 {
+				result[groupName] = map[string]string{}
+			} else {
+				result[groupName] = weights
+			}
+		}(groupName, configName, proxyNames)
+	}
+
+	wg.Wait()
+
+	if len(result) == 0 && len(errorsMap) == 0 {
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, render.M{
+			"weights": map[string]map[string]string{},
+			"message": "No Smart groups or no weight data available",
+		})
+		return
+	}
+
+	render.JSON(w, r, render.M{
+		"weights": result,
+		"errors":  errorsMap,
 	})
 }
