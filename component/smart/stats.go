@@ -790,6 +790,12 @@ func (s *Store) GetBestProxyForTarget(group, config string, target string, weigh
 		bestNodes = append(bestNodes, nodeList[i].name)
 		bestWeights = append(bestWeights, nodeList[i].weight)
 	}
+
+	// force retry exploring if best weight was degraded
+	if len(bestWeights) > 0 && bestWeights[0] < 0.4 && len(nodesWithWeight) < availableNodesCount {
+		return nil, nil, errors.New("no suitable node")
+	}
+
 	return bestNodes, bestWeights, nil
 }
 

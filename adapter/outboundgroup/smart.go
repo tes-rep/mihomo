@@ -1232,7 +1232,7 @@ func (s *Smart) handleFailedConnection(proxyName, cacheKey, domain string, calcu
 	}
 
 	if isDegraded {
-		return calculatedWeight * nodeState.DegradedFactor, isDegraded
+		return math.Max(0.1, calculatedWeight*nodeState.DegradedFactor), isDegraded
 	} else {
 		return calculatedWeight, isDegraded
 	}
