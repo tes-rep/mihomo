@@ -330,12 +330,15 @@ func (p *Proxy) StatusTest(ctx context.Context, url string, expectedStatus utils
 		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 			return p.DialContext(ctx, &addr)
 		},
-		MaxIdleConns:          100,
-		IdleConnTimeout:       10 * time.Second,
+		DisableKeepAlives:     true,
+		ForceAttemptHTTP2:     false,
+		TLSNextProto:          map[string]func(string, *tls.Conn) http.RoundTripper{},
+		MaxIdleConns:          0,
+		MaxIdleConnsPerHost:   0,
+		IdleConnTimeout:       5 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 		TLSClientConfig:       ca.GetGlobalTLSConfig(&tls.Config{}),
-		DisableKeepAlives:     true,
 	}
 
 	client := http.Client{
@@ -352,6 +355,8 @@ func (p *Proxy) StatusTest(ctx context.Context, url string, expectedStatus utils
 		return 0, false, err
 	}
 	req = req.WithContext(ctx)
+	req.Close = true
+	req.Header.Set("Connection", "close")
 	req.Header.Set("User-Agent", convert.RandUserAgent())
 
 	resp, err := client.Do(req)
