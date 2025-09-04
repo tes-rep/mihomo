@@ -339,7 +339,7 @@ func (p *Proxy) StatusTest(ctx context.Context, url string, expectedStatus utils
 	}
 
 	client := http.Client{
-		Timeout:   10 * time.Second,
+		Timeout:   5 * time.Second,
 		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -359,10 +359,20 @@ func (p *Proxy) StatusTest(ctx context.Context, url string, expectedStatus utils
 
 	resp, err := client.Do(req)
 	if err != nil {
+		if netErr, okTimeout := err.(net.Error); okTimeout && netErr.Timeout() {
+			return 599, true, nil
+		}
 		return 0, false, err
 	}
 
-	if resp != nil && resp.StatusCode == http.StatusForbidden && req.Method == http.MethodHead {
+	banHeadStatus := map[int]bool{
+		http.StatusForbidden:        true, // 403
+		520:                        true, // Cloudflare 520
+		http.StatusMethodNotAllowed: true, // 405
+		http.StatusNotImplemented:   true, // 501
+	}
+
+	if resp != nil && banHeadStatus[resp.StatusCode] && req.Method == http.MethodHead {
 		_ = resp.Body.Close()
 		getReq, err2 := http.NewRequest(http.MethodGet, url, nil)
 		if err2 != nil {
@@ -373,6 +383,9 @@ func (p *Proxy) StatusTest(ctx context.Context, url string, expectedStatus utils
 
 		resp, err = client.Do(getReq)
 		if err != nil {
+			if netErr, okTimeout := err.(net.Error); okTimeout && netErr.Timeout() {
+				return 599, true, nil
+			}
 			return 0, false, err
 		}
 	}

@@ -1031,17 +1031,19 @@ func (s *Smart) checkNodeQualityDegradation(
 			needTest = true
 		}
 		if needTest {
-			expectedStatus, _ := utils.NewUnsignedRanges[uint16]("200-299")
+			expectedStatus, _ := utils.NewUnsignedRanges[uint16]("200-399")
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			url := "https://" + metadata.Host + "/"
 			status, ok, err := proxy.StatusTest(ctx, url, expectedStatus)
 			atomicRecord.Set("status", int64(status))
-			if err == nil && (!ok && (status == 403 || status == 429 || status == 407)) {
-				degradedWeight := math.Max(0.1, newWeight*0.3)
-				log.Debugln("[Smart] HTTPS connection detected abnormal response [%d], [%s] for domain [%s], degrade weight from %.4f to %.4f (%s)",
-					status, proxyName, addressDisplay, newWeight, degradedWeight, weightType)
-				return degradedWeight, true
+			if err == nil && !ok {
+				if status == 403 || status == 429 || status == 407 || status == 599 {
+					degradedWeight := math.Max(0.1, newWeight*0.3)
+					log.Debugln("[Smart] Connection [%s] - [%s] - [%s] - [%s] detected abnormal response [%d], degrade weight from %.4f to %.4f",
+						s.Name(), proxyName, weightType, addressDisplay, status, newWeight, degradedWeight)
+					return degradedWeight, true
+				}
 			}
 		}
 	}
