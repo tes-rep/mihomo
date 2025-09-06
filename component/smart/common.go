@@ -123,12 +123,13 @@ type (
 	}
 
 	NodeState struct {
-		Name           string    `json:"name"`
-		FailureCount   int       `json:"failure_count"`
-		LastFailure    time.Time `json:"last_failure"`
-		BlockedUntil   time.Time `json:"blocked_until"`
-		Degraded       bool      `json:"degraded"`
-		DegradedFactor float64   `json:"degraded_factor"`
+		Name               string            `json:"name"`
+		FailureCount       int               `json:"failure_count"`
+		LastFailure        time.Time         `json:"last_failure"`
+		BlockedUntil       time.Time         `json:"blocked_until"`
+		Degraded           bool              `json:"degraded"`
+		DegradedFactor     float64           `json:"degraded_factor"`
+		DomainFailureCount map[string]int    `json:"domain_failure_count"` // 新增：记录每个域名的失败次数
 	}
 
 	RankingData struct {

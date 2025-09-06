@@ -1701,19 +1701,7 @@ func (s *Store) MarkConnectionFailed(group, config string, proxiesCount int, pro
 
 	failedPrefix := FormatCacheKey(KeyTypeFailed, config, group, "")
 	failedCount := len(GetCacheValuesByPrefix(failedPrefix))
-	var threshold int
-	if proxiesCount <= 0 {
-		threshold = 3
-	} else {
-		thr := proxiesCount / 2
-		if thr < 3 {
-			thr = 3
-		}
-		if thr > proxiesCount {
-			thr = proxiesCount
-		}
-		threshold = thr
-	}
+	threshold := int(math.Min(float64(proxiesCount), math.Max(float64(proxiesCount)/1.5, 3)))
 
 	n.lock.Lock()
 	defer n.lock.Unlock()

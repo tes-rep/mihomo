@@ -598,23 +598,35 @@ func (s *Smart) checkAndRecoverDegradedNodes() {
 				recoveryFactor = 1.0
 				shouldRecover = true
 				state.FailureCount = 0
+				for k := range state.DomainFailureCount {
+					state.DomainFailureCount[k] = 0
+				}
 			case timeSinceLastFailure > failureRecovery15min:
 				if state.DegradedFactor < 0.9 {
 					recoveryFactor = 0.9
 					shouldRecover = true
 					state.FailureCount = int(float64(state.FailureCount) * 0.5)
+					for k, v := range state.DomainFailureCount {
+						state.DomainFailureCount[k] = int(float64(v) * 0.5)
+					}
 				}
 			case timeSinceLastFailure > failureRecovery10min:
 				if state.DegradedFactor < 0.75 {
 					recoveryFactor = 0.75
 					shouldRecover = true
 					state.FailureCount = int(float64(state.FailureCount) * 0.7)
+					for k, v := range state.DomainFailureCount {
+						state.DomainFailureCount[k] = int(float64(v) * 0.7)
+					}
 				}
 			case timeSinceLastFailure > failureRecovery5min:
 				if state.DegradedFactor < 0.5 {
 					recoveryFactor = 0.5
 					shouldRecover = true
 					state.FailureCount = int(float64(state.FailureCount) * 0.9)
+					for k, v := range state.DomainFailureCount {
+						state.DomainFailureCount[k] = int(float64(v) * 0.9)
+					}
 				}
 			}
 
@@ -632,6 +644,9 @@ func (s *Smart) checkAndRecoverDegradedNodes() {
 			timeSinceLastFailure := time.Since(state.LastFailure)
 			if timeSinceLastFailure > failureRecovery10min {
 				state.FailureCount = 0
+				for k := range state.DomainFailureCount {
+					state.DomainFailureCount[k] = 0
+				}
 				shouldUpdate = true
 				log.Debugln("[Smart] Reset failure count for node [%s]", nodeName)
 			}
@@ -1195,42 +1210,82 @@ func (s *Smart) handleFailedConnection(proxyName, cacheKey, domain string, calcu
 	var nodeState smart.NodeState
 	var isDegraded bool
 
+	const domainCountThreshold = 10        // 不同失败域名数量阈值
+	const mildFailureCountThreshold = 20
+	const mediumFailureCountThreshold = 50
+	const severeFailureCountThreshold = 80
+
 	if data, exists := nodeStateData[proxyName]; exists {
 		if json.Unmarshal(data, &nodeState) != nil {
 			nodeState = smart.NodeState{
-				Name:           proxyName,
-				FailureCount:   1,
-				LastFailure:    time.Now(),
-				Degraded:       false,
-				DegradedFactor: 1.0,
+				Name:               proxyName,
+				FailureCount:       1,
+				LastFailure:        time.Now(),
+				Degraded:           false,
+				DegradedFactor:     1.0,
+				DomainFailureCount: map[string]int{domain: 1},
 			}
 		} else {
 			nodeState.FailureCount++
 			nodeState.LastFailure = time.Now()
+			if nodeState.DomainFailureCount == nil {
+				nodeState.DomainFailureCount = make(map[string]int)
+			}
+			nodeState.DomainFailureCount[domain]++
 		}
 	} else {
 		nodeState = smart.NodeState{
-			Name:           proxyName,
-			FailureCount:   1,
-			LastFailure:    time.Now(),
-			Degraded:       false,
-			DegradedFactor: 1.0,
+			Name:               proxyName,
+			FailureCount:       1,
+			LastFailure:        time.Now(),
+			Degraded:           false,
+			DegradedFactor:     1.0,
+			DomainFailureCount: map[string]int{domain: 1},
 		}
 	}
 
-	if nodeState.FailureCount >= 50 {
-		nodeState.Degraded = true
-		nodeState.DegradedFactor = 0.3
-		nodeState.BlockedUntil = time.Now().Add(5 * time.Minute)
-		isDegraded = true
-	} else if nodeState.FailureCount >= 30 {
-		nodeState.Degraded = true
-		nodeState.DegradedFactor = 0.5
-		isDegraded = true
-	} else if nodeState.FailureCount >= 10 {
-		nodeState.Degraded = true
-		nodeState.DegradedFactor = 0.7
-		isDegraded = true
+	failedDomainCount := 0
+	for _, cnt := range nodeState.DomainFailureCount {
+		if cnt >= mildFailureCountThreshold {
+			failedDomainCount++
+		}
+	}
+
+	if failedDomainCount >= domainCountThreshold {
+		switch {
+		case failedDomainCount >= domainCountThreshold*4:
+			nodeState.Degraded = true
+			nodeState.DegradedFactor = 0.4
+			nodeState.BlockedUntil = time.Now().Add(60 * time.Minute)
+			isDegraded = true
+		case failedDomainCount >= domainCountThreshold*2:
+			nodeState.Degraded = true
+			nodeState.DegradedFactor = 0.6
+			nodeState.BlockedUntil = time.Now().Add(45 * time.Minute)
+			isDegraded = true
+		default:
+			nodeState.Degraded = true
+			nodeState.DegradedFactor = 0.8
+			nodeState.BlockedUntil = time.Now().Add(30 * time.Minute)
+			isDegraded = true
+		}
+
+		additionalBlock := 0
+		if nodeState.FailureCount >= severeFailureCountThreshold {
+			nodeState.DegradedFactor = nodeState.DegradedFactor*0.7
+			additionalBlock = 30
+		} else if nodeState.FailureCount >= mediumFailureCountThreshold {
+			nodeState.DegradedFactor = nodeState.DegradedFactor*0.8
+			additionalBlock = 20
+		} else if nodeState.FailureCount >= mildFailureCountThreshold {
+			nodeState.DegradedFactor = nodeState.DegradedFactor*0.9
+			additionalBlock = 10
+		}
+		if nodeState.BlockedUntil.After(time.Now()) {
+			nodeState.BlockedUntil = nodeState.BlockedUntil.Add(time.Duration(additionalBlock) * time.Minute)
+		} else {
+			nodeState.BlockedUntil = time.Now().Add(time.Duration(additionalBlock) * time.Minute)
+		}
 	}
 
 	if nodeStateBytes, err := json.Marshal(&nodeState); err == nil {
