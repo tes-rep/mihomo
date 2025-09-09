@@ -1683,20 +1683,22 @@ func (s *Store) clearThrottlePrefix(prefix string) {
 }
 
 // 标记连接失败
-func (s *Store) MarkConnectionFailed(group, config string, proxiesCount int, proxy string) {
+func (s *Store) MarkConnectionFailed(group, config string, proxiesCount int, triedProxies map[string]bool) {
 	n := &s.networkFailureManager
 	groupKey := fmt.Sprintf("%s:%s", group, config)
-	key := FormatCacheKey(KeyTypeFailed, config, group, proxy)
 	now := time.Now()
 
-	n.cacheThrottle.mutex.Lock()
-	last := n.cacheThrottle.lastSet[key]
-	if now.Sub(last) >= n.writeInterval {
-		n.cacheThrottle.lastSet[key] = now
-		n.cacheThrottle.mutex.Unlock()
-		SetCacheValue(key, now)
-	} else {
-		n.cacheThrottle.mutex.Unlock()
+	for proxy := range triedProxies {
+		key := FormatCacheKey(KeyTypeFailed, config, group, proxy)
+		n.cacheThrottle.mutex.Lock()
+		last := n.cacheThrottle.lastSet[key]
+		if now.Sub(last) >= n.writeInterval {
+			n.cacheThrottle.lastSet[key] = now
+			n.cacheThrottle.mutex.Unlock()
+			SetCacheValue(key, now)
+		} else {
+			n.cacheThrottle.mutex.Unlock()
+		}
 	}
 
 	failedPrefix := FormatCacheKey(KeyTypeFailed, config, group, "")

@@ -169,7 +169,6 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 
 	tryDial := func(proxy C.Proxy, proxies []C.Proxy, triedProxies map[string]bool, maxRetries int, wrapMetric bool) (C.Conn, error) {
 		var finalErr error
-		firstProxyName := proxy.Name()
 		for i := 0; i < maxRetries; i++ {
 			historyConnectTime := s.getHistoryConnectStats(metadata, proxy)
 			const thresholdRatio = 2.0
@@ -229,10 +228,7 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 		}
 		if finalErr != nil && s.store != nil {
 			s.onDialFailed(proxy.Type(), finalErr, s.GroupBase.healthCheck)
-			domain, _ := smart.GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
-			if domain != "" {
-				s.store.MarkConnectionFailed(s.Name(), s.configName, len(proxies), firstProxyName)
-			}
+			s.store.MarkConnectionFailed(s.Name(), s.configName, len(proxies), triedProxies)
 		}
 		return nil, finalErr
 	}
@@ -311,10 +307,7 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 	}
 	if finalErr != nil && s.store != nil {
 		s.onDialFailed(proxy.Type(), finalErr, s.GroupBase.healthCheck)
-		domain, _ := smart.GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
-		if domain != "" {
-			s.store.MarkConnectionFailed(s.Name(), s.configName, len(proxies), proxy.Name())
-		}
+		s.store.MarkConnectionFailed(s.Name(), s.configName, len(proxies), triedProxies)
 	}
 	return nil, finalErr
 }
@@ -1460,7 +1453,7 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 	}
 
 	if status == "failed" {
-		s.store.MarkConnectionFailed(s.Name(), s.configName, len(s.GetProxies(false)), proxy.Name())
+		s.store.MarkConnectionFailed(s.Name(), s.configName, len(s.GetProxies(false)), map[string]bool{proxy.Name(): true})
 	} else if status == "success" {
 		s.store.MarkConnectionSuccess(s.Name(), s.configName)
 	}
