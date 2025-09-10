@@ -133,7 +133,10 @@ func CalculateWeight(success, failure, connectTime, latency int64, isUDP bool, u
 	// 12. 质量加成计算
 	var qualityBonus float64 = 0
 
-	if latency < 30 {
+	if latency > 0 && latency < 100 {
+		qualityBonus += 0.1
+	}
+	if connectTime > 0 && connectTime < 10 {
 		qualityBonus += 0.1
 	}
 	if successRate > 0.95 {
@@ -142,7 +145,7 @@ func CalculateWeight(success, failure, connectTime, latency int64, isUDP bool, u
 	if (sceneType == "streaming" || sceneType == "transfer") && downloadMB > 20 {
 		qualityBonus += 0.1
 	}
-	if sceneType == "interactive" && latency < 50 && successRate > 0.9 {
+	if sceneType == "interactive" && latency > 0 && latency < 300 && successRate > 0.9 {
 		qualityBonus += 0.1
 	}
 
@@ -202,18 +205,30 @@ func calculateTrafficFactor(trafficMB, maxRateKB, durationMinutes float64, isSho
 
 	var baseFactor float64
 	switch {
+	case trafficMB < 0.005: // <5KB
+		baseFactor = 0.08
+	case trafficMB < 0.01: // 5KB~10KB
+		baseFactor = 0.18 + 0.10*math.Log10(trafficMB/0.005)
+	case trafficMB < 0.05:
+		baseFactor = 0.35 + 0.20*math.Log10(trafficMB/0.01)
+	case trafficMB < 0.1:
+		baseFactor = 0.55 + 0.20*math.Log10(trafficMB/0.05)
+	case trafficMB < 0.5:
+		baseFactor = 0.75 + 0.25*math.Log10(trafficMB/0.1)
 	case trafficMB < 1:
-		baseFactor = trafficMB * 0.7
-	case trafficMB < 10:
-		baseFactor = 0.7 + 0.3*math.Log10(trafficMB)
-	case trafficMB < 50:
-		baseFactor = 1.0 + 0.3*math.Log10(trafficMB/10)
+		baseFactor = 1.0 + 0.20*math.Log10(trafficMB/0.5)
+	case trafficMB < 5:
+		baseFactor = 1.2 + 0.15*math.Log10(trafficMB/1)
+	case trafficMB < 20:
+		baseFactor = 1.35 + 0.12*math.Log10(trafficMB/5)
+	case trafficMB < 100:
+		baseFactor = 1.5 + 0.10*math.Log10(trafficMB/20)
 	case trafficMB < 500:
-		baseFactor = 1.3 + 0.3*math.Log10(trafficMB/50)
+		baseFactor = 1.6 + 0.08*math.Log10(trafficMB/100)
 	case trafficMB < 3000:
-		baseFactor = 1.6 + 0.3*math.Log10(trafficMB/500)
+		baseFactor = 1.7 + 0.06*math.Log10(trafficMB/500)
 	default:
-		baseFactor = 1.9 + 0.25*math.Log10(trafficMB/3000)
+		baseFactor = 1.8 + 0.05*math.Log10(trafficMB/3000)
 	}
 
 	// 吞吐量加成
@@ -231,8 +246,12 @@ func calculateTrafficFactor(trafficMB, maxRateKB, durationMinutes float64, isSho
 		rateBonus = 1.20 + 0.05*((maxRateKB-2000)/3000.0)
 	case maxRateKB < 20000:
 		rateBonus = 1.25 + 0.05*((maxRateKB-5000)/15000.0)
+	case maxRateKB < 100000:
+		rateBonus = 1.30 + 0.04*math.Log10(maxRateKB/20000.0)
+		rateBonus = math.Min(rateBonus, 1.35)
 	default:
-		rateBonus = 1.30
+		rateBonus = 1.35 + 0.02*math.Log10(maxRateKB/100000.0)
+		rateBonus = math.Min(rateBonus, 1.40)
 	}
 	baseFactor *= rateBonus
 
