@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/metacubex/mihomo/component/ca"
 	mihomoHttp "github.com/metacubex/mihomo/component/http"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/constant/features"
@@ -172,7 +171,7 @@ func (u *CoreUpdater) Update(currentExePath string, channel string, force bool) 
 func (u *CoreUpdater) getLatestVersion(versionURL string) (version string, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
-	resp, err := mihomoHttp.HttpRequest(ctx, versionURL, http.MethodGet, nil, nil, mihomoHttp.WithCAOption(ca.Option{ZeroTrust: true}))
+	resp, err := mihomoHttp.HttpRequest(ctx, versionURL, http.MethodGet, nil, nil)
 	if err != nil {
 		return "", err
 	}
@@ -195,7 +194,7 @@ func (u *CoreUpdater) getLatestVersion(versionURL string) (version string, err e
 func (u *CoreUpdater) download(updateDir, packagePath, packageURL string) (err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*90)
 	defer cancel()
-	resp, err := mihomoHttp.HttpRequest(ctx, packageURL, http.MethodGet, nil, nil, mihomoHttp.WithCAOption(ca.Option{ZeroTrust: true}))
+	resp, err := mihomoHttp.HttpRequest(ctx, packageURL, http.MethodGet, nil, nil)
 	if err != nil {
 		return fmt.Errorf("http request failed: %w", err)
 	}

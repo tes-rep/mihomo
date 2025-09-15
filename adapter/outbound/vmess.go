@@ -123,14 +123,13 @@ func (v *Vmess) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.M
 
 		if v.option.TLS {
 			wsOpts.TLS = true
-			wsOpts.TLSConfig, err = ca.GetTLSConfig(ca.Option{
-				TLSConfig: &tls.Config{
-					ServerName:         host,
-					InsecureSkipVerify: v.option.SkipCertVerify,
-					NextProtos:         []string{"http/1.1"},
-				},
-				Fingerprint: v.option.Fingerprint,
-			})
+			tlsConfig := &tls.Config{
+				ServerName:         host,
+				InsecureSkipVerify: v.option.SkipCertVerify,
+				NextProtos:         []string{"http/1.1"},
+			}
+
+			wsOpts.TLSConfig, err = ca.GetSpecifiedFingerprintTLSConfig(tlsConfig, v.option.Fingerprint)
 			if err != nil {
 				return nil, err
 			}
@@ -502,13 +501,10 @@ func NewVmess(option VmessOption) (*Vmess, error) {
 		}
 		var tlsConfig *tls.Config
 		if option.TLS {
-			tlsConfig, err = ca.GetTLSConfig(ca.Option{
-				TLSConfig: &tls.Config{
-					InsecureSkipVerify: v.option.SkipCertVerify,
-					ServerName:         v.option.ServerName,
-				},
-				Fingerprint: v.option.Fingerprint,
-			})
+			tlsConfig, err = ca.GetSpecifiedFingerprintTLSConfig(&tls.Config{
+				InsecureSkipVerify: v.option.SkipCertVerify,
+				ServerName:         v.option.ServerName,
+			}, v.option.Fingerprint)
 			if err != nil {
 				return nil, err
 			}

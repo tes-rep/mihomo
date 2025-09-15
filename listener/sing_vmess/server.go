@@ -76,7 +76,7 @@ func New(config LC.VmessServer, tunnel C.Tunnel, additions ...inbound.Addition) 
 
 	sl = &Listener{false, config, nil, service}
 
-	tlsConfig := &tlsC.Config{Time: ntp.Now}
+	tlsConfig := &tlsC.Config{}
 	var realityBuilder *reality.Builder
 	var httpServer http.Server
 

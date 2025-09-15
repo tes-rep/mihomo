@@ -33,21 +33,20 @@ type ShadowTLSOption struct {
 }
 
 func NewShadowTLS(ctx context.Context, conn net.Conn, option *ShadowTLSOption) (net.Conn, error) {
-	tlsConfig, err := ca.GetTLSConfig(ca.Option{
-		TLSConfig: &tls.Config{
-			NextProtos:         option.ALPN,
-			MinVersion:         tls.VersionTLS12,
-			InsecureSkipVerify: option.SkipCertVerify,
-			ServerName:         option.Host,
-		},
-		Fingerprint: option.Fingerprint,
-	})
-	if err != nil {
-		return nil, err
+	tlsConfig := &tls.Config{
+		NextProtos:         option.ALPN,
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: option.SkipCertVerify,
+		ServerName:         option.Host,
 	}
-
 	if option.Version == 1 {
 		tlsConfig.MaxVersion = tls.VersionTLS12 // ShadowTLS v1 only support TLS 1.2
+	}
+
+	var err error
+	tlsConfig, err = ca.GetSpecifiedFingerprintTLSConfig(tlsConfig, option.Fingerprint)
+	if err != nil {
+		return nil, err
 	}
 
 	tlsHandshake := uTLSHandshakeFunc(tlsConfig, option.ClientFingerprint, option.Version)

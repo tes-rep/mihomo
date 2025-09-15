@@ -20,7 +20,6 @@ import (
 	LC "github.com/metacubex/mihomo/listener/config"
 	"github.com/metacubex/mihomo/listener/sing"
 	"github.com/metacubex/mihomo/log"
-	"github.com/metacubex/mihomo/ntp"
 
 	"github.com/metacubex/sing-quic/hysteria2"
 
@@ -62,7 +61,6 @@ func New(config LC.Hysteria2Server, tunnel C.Tunnel, additions ...inbound.Additi
 		return nil, err
 	}
 	tlsConfig := &tlsC.Config{
-		Time:       ntp.Now,
 		MinVersion: tlsC.VersionTLS13,
 	}
 	tlsConfig.Certificates = []tlsC.Certificate{tlsC.UCertificate(cert)}

@@ -57,17 +57,15 @@ func NewGostWebsocket(ctx context.Context, conn net.Conn, option *Option) (net.C
 		Headers:   header,
 	}
 
-	var err error
 	if option.TLS {
 		config.TLS = true
-		config.TLSConfig, err = ca.GetTLSConfig(ca.Option{
-			TLSConfig: &tls.Config{
-				ServerName:         option.Host,
-				InsecureSkipVerify: option.SkipCertVerify,
-				NextProtos:         []string{"http/1.1"},
-			},
-			Fingerprint: option.Fingerprint,
-		})
+		tlsConfig := &tls.Config{
+			ServerName:         option.Host,
+			InsecureSkipVerify: option.SkipCertVerify,
+			NextProtos:         []string{"http/1.1"},
+		}
+		var err error
+		config.TLSConfig, err = ca.GetSpecifiedFingerprintTLSConfig(tlsConfig, option.Fingerprint)
 		if err != nil {
 			return nil, err
 		}
@@ -77,6 +75,7 @@ func NewGostWebsocket(ctx context.Context, conn net.Conn, option *Option) (net.C
 		}
 	}
 
+	var err error
 	conn, err = vmess.StreamWebsocketConn(ctx, conn, config)
 	if err != nil {
 		return nil, err

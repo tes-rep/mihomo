@@ -10,9 +10,7 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/metacubex/mihomo/common/once"
 	C "github.com/metacubex/mihomo/constant"
-	"github.com/metacubex/mihomo/ntp"
 )
 
 var globalCertPool *x509.CertPool
@@ -67,6 +65,18 @@ func ResetCertificate() {
 	initializeCertPool()
 }
 
+func getCertPool() *x509.CertPool {
+	if globalCertPool == nil {
+		mutex.Lock()
+		defer mutex.Unlock()
+		if globalCertPool != nil {
+			return globalCertPool
+		}
+		initializeCertPool()
+	}
+	return globalCertPool
+}
+
 func GetCertPool(customCA string, customCAString string) (*x509.CertPool, error) {
 	var certificate []byte
 	var err error
@@ -89,41 +99,22 @@ func GetCertPool(customCA string, customCAString string) (*x509.CertPool, error)
 		}
 		return certPool, nil
 	} else {
-		mutex.Lock()
-		defer mutex.Unlock()
-		if globalCertPool == nil {
-			initializeCertPool()
-		}
-		return globalCertPool, nil
+		return getCertPool(), nil
 	}
 }
 
-type Option struct {
-	TLSConfig      *tls.Config
-	Fingerprint    string
-	CustomCA       string
-	CustomCAString string
-	ZeroTrust      bool
-}
-
-func GetTLSConfig(opt Option) (tlsConfig *tls.Config, err error) {
-	tlsConfig = opt.TLSConfig
+// GetTLSConfig specified fingerprint, customCA and customCAString
+func GetTLSConfig(tlsConfig *tls.Config, fingerprint string, customCA string, customCAString string) (_ *tls.Config, err error) {
 	if tlsConfig == nil {
 		tlsConfig = &tls.Config{}
 	}
-	tlsConfig.Time = ntp.Now
-
-	if opt.ZeroTrust {
-		tlsConfig.RootCAs = zeroTrustCertPool()
-	} else {
-		tlsConfig.RootCAs, err = GetCertPool(opt.CustomCA, opt.CustomCAString)
-		if err != nil {
-			return nil, err
-		}
+	tlsConfig.RootCAs, err = GetCertPool(customCA, customCAString)
+	if err != nil {
+		return nil, err
 	}
 
-	if len(opt.Fingerprint) > 0 {
-		tlsConfig.VerifyPeerCertificate, err = NewFingerprintVerifier(opt.Fingerprint)
+	if len(fingerprint) > 0 {
+		tlsConfig.VerifyPeerCertificate, err = NewFingerprintVerifier(fingerprint)
 		if err != nil {
 			return nil, err
 		}
@@ -132,12 +123,12 @@ func GetTLSConfig(opt Option) (tlsConfig *tls.Config, err error) {
 	return tlsConfig, nil
 }
 
-var zeroTrustCertPool = once.OnceValue(func() *x509.CertPool {
-	if len(_CaCertificates) != 0 { // always using embed cert first
-		zeroTrustCertPool := x509.NewCertPool()
-		if zeroTrustCertPool.AppendCertsFromPEM(_CaCertificates) {
-			return zeroTrustCertPool
-		}
-	}
-	return nil // fallback to system pool
-})
+// GetSpecifiedFingerprintTLSConfig specified fingerprint
+func GetSpecifiedFingerprintTLSConfig(tlsConfig *tls.Config, fingerprint string) (*tls.Config, error) {
+	return GetTLSConfig(tlsConfig, fingerprint, "", "")
+}
+
+func GetGlobalTLSConfig(tlsConfig *tls.Config) *tls.Config {
+	tlsConfig, _ = GetTLSConfig(tlsConfig, "", "", "")
+	return tlsConfig
+}

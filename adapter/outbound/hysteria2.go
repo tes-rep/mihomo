@@ -141,16 +141,14 @@ func NewHysteria2(option Hysteria2Option) (*Hysteria2, error) {
 		serverName = option.SNI
 	}
 
-	tlsConfig, err := ca.GetTLSConfig(ca.Option{
-		TLSConfig: &tls.Config{
-			ServerName:         serverName,
-			InsecureSkipVerify: option.SkipCertVerify,
-			MinVersion:         tls.VersionTLS13,
-		},
-		Fingerprint:    option.Fingerprint,
-		CustomCA:       option.CustomCA,
-		CustomCAString: option.CustomCAString,
-	})
+	tlsConfig := &tls.Config{
+		ServerName:         serverName,
+		InsecureSkipVerify: option.SkipCertVerify,
+		MinVersion:         tls.VersionTLS13,
+	}
+
+	var err error
+	tlsConfig, err = ca.GetTLSConfig(tlsConfig, option.Fingerprint, option.CustomCA, option.CustomCAString)
 	if err != nil {
 		return nil, err
 	}

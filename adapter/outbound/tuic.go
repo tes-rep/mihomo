@@ -161,20 +161,17 @@ func (t *Tuic) ProxyInfo() C.ProxyInfo {
 func NewTuic(option TuicOption) (*Tuic, error) {
 	addr := net.JoinHostPort(option.Server, strconv.Itoa(option.Port))
 	serverName := option.Server
+	tlsConfig := &tls.Config{
+		ServerName:         serverName,
+		InsecureSkipVerify: option.SkipCertVerify,
+		MinVersion:         tls.VersionTLS13,
+	}
 	if option.SNI != "" {
-		serverName = option.SNI
+		tlsConfig.ServerName = option.SNI
 	}
 
-	tlsConfig, err := ca.GetTLSConfig(ca.Option{
-		TLSConfig: &tls.Config{
-			ServerName:         serverName,
-			InsecureSkipVerify: option.SkipCertVerify,
-			MinVersion:         tls.VersionTLS13,
-		},
-		Fingerprint:    option.Fingerprint,
-		CustomCA:       option.CustomCA,
-		CustomCAString: option.CustomCAString,
-	})
+	var err error
+	tlsConfig, err = ca.GetTLSConfig(tlsConfig, option.Fingerprint, option.CustomCA, option.CustomCAString)
 	if err != nil {
 		return nil, err
 	}

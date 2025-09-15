@@ -20,7 +20,6 @@ import (
 	tlsC "github.com/metacubex/mihomo/component/tls"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
-	"github.com/metacubex/mihomo/ntp"
 	"github.com/metacubex/mihomo/tunnel/statistic"
 
 	"github.com/go-chi/chi/v5"
@@ -202,7 +201,7 @@ func startTLS(cfg *Config) {
 		}
 
 		log.Infoln("RESTful API tls listening at: %s", l.Addr().String())
-		tlsConfig := &tlsC.Config{Time: ntp.Now}
+		tlsConfig := &tlsC.Config{}
 		tlsConfig.NextProtos = []string{"h2", "http/1.1"}
 		tlsConfig.Certificates = []tlsC.Certificate{tlsC.UCertificate(cert)}
 

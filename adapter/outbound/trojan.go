@@ -100,15 +100,14 @@ func (t *Trojan) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.
 		}
 
 		wsOpts.TLS = true
-		wsOpts.TLSConfig, err = ca.GetTLSConfig(ca.Option{
-			TLSConfig: &tls.Config{
-				NextProtos:         alpn,
-				MinVersion:         tls.VersionTLS12,
-				InsecureSkipVerify: t.option.SkipCertVerify,
-				ServerName:         t.option.SNI,
-			},
-			Fingerprint: t.option.Fingerprint,
-		})
+		tlsConfig := &tls.Config{
+			NextProtos:         alpn,
+			MinVersion:         tls.VersionTLS12,
+			InsecureSkipVerify: t.option.SkipCertVerify,
+			ServerName:         t.option.SNI,
+		}
+
+		wsOpts.TLSConfig, err = ca.GetSpecifiedFingerprintTLSConfig(tlsConfig, t.option.Fingerprint)
 		if err != nil {
 			return nil, err
 		}
@@ -364,15 +363,15 @@ func NewTrojan(option TrojanOption) (*Trojan, error) {
 			return c, nil
 		}
 
-		tlsConfig, err := ca.GetTLSConfig(ca.Option{
-			TLSConfig: &tls.Config{
-				NextProtos:         option.ALPN,
-				MinVersion:         tls.VersionTLS12,
-				InsecureSkipVerify: option.SkipCertVerify,
-				ServerName:         option.SNI,
-			},
-			Fingerprint: option.Fingerprint,
-		})
+		tlsConfig := &tls.Config{
+			NextProtos:         option.ALPN,
+			MinVersion:         tls.VersionTLS12,
+			InsecureSkipVerify: option.SkipCertVerify,
+			ServerName:         option.SNI,
+		}
+
+		var err error
+		tlsConfig, err = ca.GetSpecifiedFingerprintTLSConfig(tlsConfig, option.Fingerprint)
 		if err != nil {
 			return nil, err
 		}

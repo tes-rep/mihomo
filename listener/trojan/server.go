@@ -15,7 +15,6 @@ import (
 	LC "github.com/metacubex/mihomo/listener/config"
 	"github.com/metacubex/mihomo/listener/reality"
 	"github.com/metacubex/mihomo/listener/sing"
-	"github.com/metacubex/mihomo/ntp"
 	"github.com/metacubex/mihomo/transport/gun"
 	"github.com/metacubex/mihomo/transport/shadowsocks/core"
 	"github.com/metacubex/mihomo/transport/socks5"
@@ -71,7 +70,7 @@ func New(config LC.TrojanServer, tunnel C.Tunnel, additions ...inbound.Addition)
 	}
 	sl = &Listener{false, config, nil, keys, pickCipher, h}
 
-	tlsConfig := &tlsC.Config{Time: ntp.Now}
+	tlsConfig := &tlsC.Config{}
 	var realityBuilder *reality.Builder
 	var httpServer http.Server
 
