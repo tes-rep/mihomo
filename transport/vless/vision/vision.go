@@ -1,4 +1,6 @@
 // Package vision implements VLESS flow `xtls-rprx-vision` introduced by Xray-core.
+//
+// same logic as https://github.com/XTLS/Xray-core/blob/v25.9.11/proxy/proxy.go
 package vision
 
 import (
@@ -27,7 +29,7 @@ func NewConn(conn net.Conn, tlsConn net.Conn, userUUID uuid.UUID) (*Conn, error)
 		ExtendedWriter:             N.NewExtendedWriter(conn),
 		Conn:                       conn,
 		userUUID:                   userUUID,
-		packetsToFilter:            6,
+		packetsToFilter:            8,
 		readProcess:                true,
 		readFilterUUID:             true,
 		writeFilterApplicationData: true,
@@ -82,7 +84,7 @@ func NewConn(conn net.Conn, tlsConn net.Conn, userUUID uuid.UUID) (*Conn, error)
 	}
 	if t == nil || p == nil {
 		log.Warnln("vision: not a valid supported TLS connection: %s", reflect.TypeOf(tlsConn))
-		return nil, fmt.Errorf(`failed to use vision, maybe "security" is not "tls" or "utls"`)
+		return nil, fmt.Errorf(`failed to use vision, maybe "tls" is not enable and "encryption" is empty`)
 	}
 
 	if err := checkTLSVersion(tlsConn); err != nil {
