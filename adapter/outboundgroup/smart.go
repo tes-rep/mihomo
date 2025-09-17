@@ -5,29 +5,35 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"math/rand"
+	"net"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/dlclark/regexp2"
 	"github.com/metacubex/mihomo/common/callback"
 	"github.com/metacubex/mihomo/common/singleflight"
 	"github.com/metacubex/mihomo/common/utils"
+	"github.com/metacubex/mihomo/component/dialer"
 	"github.com/metacubex/mihomo/component/mmdb"
 	"github.com/metacubex/mihomo/component/profile/cachefile"
 	"github.com/metacubex/mihomo/component/smart"
 	"github.com/metacubex/mihomo/component/smart/lightgbm"
+	"github.com/metacubex/mihomo/component/tcp"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/constant/provider"
 	"github.com/metacubex/mihomo/log"
 	"github.com/metacubex/mihomo/tunnel"
 	"github.com/metacubex/mihomo/tunnel/statistic"
-
-	"github.com/dlclark/regexp2"
+	"github.com/samber/lo"
 )
 
 const (
@@ -84,6 +90,7 @@ type Smart struct {
 	weightModel    *lightgbm.WeightModel
 	strategy       string
 	sampleRate     float64
+	noParallelDial bool
 }
 
 type priorityRule struct {
@@ -161,7 +168,182 @@ func (s *Smart) GetConfigFilename() string {
 	return s.configName
 }
 
+// ref: component/dialer/dialer.go:314
+func doParallelDialContext[T interface {
+	comparable
+	io.Closer
+}](proxies []C.Proxy, fn func(C.Proxy) (T, error)) (C.Proxy, T, error) {
+	results := make(chan struct {
+		proxy C.Proxy
+		conn  T
+		error error
+	})
+	returned := make(chan struct{})
+	defer close(returned)
+	racer := func(proxy C.Proxy) {
+		result := struct {
+			proxy C.Proxy
+			conn  T
+			error error
+		}{}
+		defer func() {
+			select {
+			case results <- result:
+			case <-returned:
+				if result.conn != lo.Empty[T]() && result.error == nil {
+					_ = result.conn.Close()
+				}
+			}
+		}()
+		result.conn, result.error = fn(proxy)
+		result.proxy = proxy
+	}
+
+	for _, proxy := range proxies {
+		go racer(proxy)
+	}
+	var errs []error
+	for i := 0; i < len(proxies); i++ {
+		res := <-results
+		if res.error == nil {
+			return res.proxy, res.conn, nil
+		}
+		errs = append(errs, res.error)
+	}
+
+	if len(errs) > 0 {
+		return nil, lo.Empty[T](), errors.Join(errs...)
+	}
+	return nil, lo.Empty[T](), os.ErrDeadlineExceeded
+}
+
+func (s *Smart) parallelDialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
+	availableProxies := s.GetProxies(true)
+	if len(availableProxies) == 0 {
+		return nil, errors.New("no proxy available")
+	}
+
+	triedProxies := make(map[string]bool)
+
+	getBatch := func(proxies []C.Proxy, i int) ([]C.Proxy, time.Duration) {
+		const parallelDials = 3
+		begin := i * parallelDials
+		if begin >= len(proxies) {
+			return nil, 0
+		}
+		end := begin + parallelDials
+		if end > len(proxies) {
+			end = len(proxies)
+		}
+		batch := proxies[begin:end]
+		var historyConnectTime int64
+		for _, p := range batch {
+			triedProxies[p.Name()] = true
+			hct := s.getHistoryConnectStats(metadata, p)
+			if hct > historyConnectTime {
+				historyConnectTime = hct
+			}
+		}
+		const thresholdRatio = 2.0
+		const dialTimeout = C.DefaultTCPTimeout / parallelDials * thresholdRatio
+		var timeout time.Duration
+		if historyConnectTime > 0 {
+			timeout = time.Duration(float64(historyConnectTime)*thresholdRatio) * time.Millisecond
+			if timeout > dialTimeout {
+				timeout = dialTimeout
+			}
+		} else {
+			timeout = dialTimeout
+		}
+		return batch, timeout
+	}
+
+	tryDial := func(proxies []C.Proxy) (C.Conn, error) {
+		var finalErr error
+		for i := 0; i < maxRetries; i++ {
+			batch, timeout := getBatch(proxies, i)
+			ctxDial, cancel := context.WithTimeout(ctx, timeout)
+			start := time.Now()
+			p, c, err := doParallelDialContext(batch, func(proxy C.Proxy) (c C.Conn, err error) {
+				return s.singleDialContext(ctxDial, proxy, metadata, start)
+			})
+			go func() {
+				<-ctxDial.Done()
+				cancel()
+			}()
+
+			if err == nil {
+				if s.store != nil {
+					return s.parallelWrapConnWithMetric(c, p, metadata), nil
+				}
+				c.AppendToChains(s)
+				s.onDialSuccess()
+				return c, nil
+			}
+
+			finalErr = err
+			if s.selected != "" {
+				break
+			}
+		}
+		if finalErr != nil && s.store != nil {
+			s.onDialFailed(proxies[0].Type(), finalErr, s.GroupBase.healthCheck)
+			s.store.MarkConnectionFailed(s.Name(), s.configName, len(proxies), triedProxies)
+		}
+		return nil, finalErr
+	}
+
+	if s.store != nil && s.store.CheckNetworkFailure(s.Name(), s.configName) {
+		proxies := s.selectFallbacks(metadata, availableProxies)
+		if len(proxies) == 0 {
+			return nil, errors.New("no proxy found in network failure mode")
+		}
+		return tryDial(proxies)
+	}
+
+	proxies := s.selectProxies(metadata, availableProxies)
+	if len(proxies) == 0 {
+		proxies = availableProxies
+	}
+	return tryDial(proxies)
+}
+
+func (s *Smart) singleDialContext(ctx context.Context, proxy C.Proxy, metadata *C.Metadata, start time.Time) (c C.Conn, err error) {
+	var nc net.Conn
+	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+		d := dialer.NewDialer(dialer.WithCallback(func(conn net.Conn, err error) {
+			if err == nil {
+				nc = conn
+			}
+		}))
+		c, err = proxy.DialContextWithDialer(ctx, d, metadata)
+		if err == C.ErrNotSupport {
+			c, err = proxy.DialContext(ctx, metadata)
+		}
+	} else {
+		c, err = proxy.DialContext(ctx, metadata)
+	}
+	if err != nil {
+		s.recordConnectionStats("failed", metadata, proxy, 0, 0, 0, 0, 0, 0, 0, false, err)
+		return nil, err
+	}
+	if nc != nil {
+		if tc, ok := nc.(*net.TCPConn); ok {
+			if err = tcp.WaitAllAcks(ctx, tc); err != nil {
+				s.recordConnectionStats("failed", metadata, proxy, 0, 0, 0, 0, 0, 0, 0, false, err)
+				return nil, err
+			}
+		}
+	}
+	s.recordConnectionStats("connected", metadata, proxy, time.Since(start).Milliseconds(), 0, 0, 0, 0, 0, 0, false, nil)
+	return c, nil
+}
+
 func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
+	if !s.noParallelDial {
+		return s.parallelDialContext(ctx, metadata)
+	}
+
 	proxies := s.GetProxies(true)
 	if len(proxies) == 0 {
 		return nil, errors.New("no proxy available")
@@ -350,6 +532,24 @@ func (s *Smart) wrapConnWithMetric(c C.Conn, proxy C.Proxy, metadata *C.Metadata
 	})
 
 	return wrappedConn, nil
+}
+
+func (s *Smart) parallelWrapConnWithMetric(c C.Conn, proxy C.Proxy, metadata *C.Metadata) C.Conn {
+	c.AppendToChains(s)
+	c = s.registerClosureMetricsCallback(c, proxy, metadata)
+
+	start := time.Now()
+
+	return callback.NewFirstReadCallBackConn(c, func(err error) {
+		latency := time.Since(start).Milliseconds()
+		if err == nil {
+			s.onDialSuccess()
+			s.recordConnectionStats("success", metadata, proxy, 0, latency, 0, 0, 0, 0, 0, false, nil)
+		} else {
+			s.onDialFailed(proxy.Type(), err, s.GroupBase.healthCheck)
+			s.recordConnectionStats("failed", metadata, proxy, 0, 0, 0, 0, 0, 0, 0, false, err)
+		}
+	})
 }
 
 func (s *Smart) Set(name string) error {
@@ -851,6 +1051,127 @@ func (s *Smart) fallbackToLoadBalance(metadata *C.Metadata, proxies []C.Proxy) C
 	return proxies[0]
 }
 
+func (s *Smart) selectFallbacks(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy {
+	if len(proxies) == 0 {
+		return nil
+	}
+
+	if metadata == nil {
+		return proxies
+	}
+
+	fallbacks := make([]C.Proxy, 0, len(proxies))
+	var first C.Proxy
+	if s.fallback != nil {
+		first = s.fallback.Unwrap(metadata, true)
+		if first != nil {
+			fallbacks = append(fallbacks, first)
+		}
+	}
+	piv := 0
+	for i, p := range proxies {
+		if p == first {
+			piv = i
+			break
+		}
+	}
+	fallbacks = append(fallbacks, proxies[piv:]...)
+	fallbacks = append(fallbacks, proxies[:piv]...)
+	return fallbacks
+}
+
+func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy {
+	if metadata == nil {
+		return proxies
+	}
+
+	if len(proxies) == 0 {
+		return nil
+	}
+
+	if s.selected != "" {
+		for _, p := range proxies {
+			if p.Name() == s.selected {
+				return []C.Proxy{p}
+			}
+		}
+	}
+
+	if s.store == nil {
+		return proxies
+	}
+
+	blockedNodes := make(map[string]bool)
+	stateData, _ := s.store.GetNodeStates(s.Name(), s.configName)
+	for nodeName, data := range stateData {
+		var state smart.NodeState
+		if json.Unmarshal(data, &state) == nil {
+			if !state.BlockedUntil.IsZero() && state.BlockedUntil.After(time.Now()) {
+				blockedNodes[nodeName] = true
+			}
+		}
+	}
+
+	proxyByName := make(map[string]C.Proxy)
+	for _, p := range proxies {
+		proxyByName[p.Name()] = p
+	}
+	findProxiesByNames := func(names []string) []C.Proxy {
+		proxies := make([]C.Proxy, 0, len(names))
+		for _, name := range names {
+			if !blockedNodes[name] {
+				if p, ok := proxyByName[name]; ok && p.AliveForTestUrl(s.testUrl) {
+					proxies = append(proxies, p)
+				}
+			}
+		}
+		return proxies
+	}
+
+	weightType := smart.WeightTypeTCP
+	if metadata.NetWork == C.UDP {
+		weightType = smart.WeightTypeUDP
+	}
+
+	trySelector := func(target string, weightType string) []C.Proxy {
+		bestNodes, _, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, target, weightType, false)
+		if err == nil && len(bestNodes) != 0 {
+			if proxies := findProxiesByNames(bestNodes); len(proxies) > 0 {
+				return proxies
+			}
+		}
+
+		return nil
+	}
+
+	// 尝试使用域名信息选择
+	domain, _ := smart.GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
+	if domain != "" {
+		if proxies := trySelector(domain, weightType); len(proxies) > 0 {
+			return proxies
+		}
+	}
+
+	// 尝试使用ASN信息选择（50%概率）
+	if rand.Float64() < 0.5 {
+		asnNumber := s.getASNCode(metadata)
+		if asnNumber != "" {
+			asnWeightType := weightType
+			if weightType == smart.WeightTypeTCP {
+				asnWeightType = smart.WeightTypeTCPASN + ":" + asnNumber
+			} else {
+				asnWeightType = smart.WeightTypeUDPASN + ":" + asnNumber
+			}
+
+			if proxies := trySelector(asnNumber, asnWeightType); len(proxies) > 0 {
+				return proxies
+			}
+		}
+	}
+
+	return s.selectFallbacks(metadata, proxies)
+}
+
 func (s *Smart) SupportUDP() bool {
 	if s.disableUDP {
 		return false
@@ -1181,7 +1502,7 @@ func (s *Smart) handleFailedConnection(proxyName, cacheKey, domain string, calcu
 	var nodeState smart.NodeState
 	var isDegraded bool
 
-	const domainCountThreshold = 10        // 不同失败域名数量阈值
+	const domainCountThreshold = 10 // 不同失败域名数量阈值
 	const mildFailureCountThreshold = 20
 	const mediumFailureCountThreshold = 50
 	const severeFailureCountThreshold = 80
@@ -1243,13 +1564,13 @@ func (s *Smart) handleFailedConnection(proxyName, cacheKey, domain string, calcu
 
 		additionalBlock := 0
 		if nodeState.FailureCount >= severeFailureCountThreshold {
-			nodeState.DegradedFactor = nodeState.DegradedFactor*0.7
+			nodeState.DegradedFactor = nodeState.DegradedFactor * 0.7
 			additionalBlock = 30
 		} else if nodeState.FailureCount >= mediumFailureCountThreshold {
-			nodeState.DegradedFactor = nodeState.DegradedFactor*0.8
+			nodeState.DegradedFactor = nodeState.DegradedFactor * 0.8
 			additionalBlock = 20
 		} else if nodeState.FailureCount >= mildFailureCountThreshold {
-			nodeState.DegradedFactor = nodeState.DegradedFactor*0.9
+			nodeState.DegradedFactor = nodeState.DegradedFactor * 0.9
 			additionalBlock = 10
 		}
 		if nodeState.BlockedUntil.After(time.Now()) {
@@ -1463,6 +1784,13 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 	var isModelPredicted bool
 
 	switch status {
+	case "connected":
+		if connectTime > 0 {
+			success := atomicRecord.Get("success").(int64)
+			oldConnectTime := atomicRecord.Get("connectTime").(int64)
+			newConnectTime := updateAverageValue(oldConnectTime, connectTime, success)
+			atomicRecord.Set("connectTime", newConnectTime)
+		}
 	case "success":
 		atomicRecord.Add("success", int64(1))
 
@@ -1883,6 +2211,12 @@ func smartWithSampleRate(sampleRate float64) smartOption {
 	}
 }
 
+func smartWithNoParallelDial(npd bool) smartOption {
+	return func(s *Smart) {
+		s.noParallelDial = npd
+	}
+}
+
 func parseSmartOption(config map[string]any) ([]smartOption, string) {
 	opts := []smartOption{}
 
@@ -1914,6 +2248,12 @@ func parseSmartOption(config map[string]any) ([]smartOption, string) {
 			opts = append(opts, smartWithSampleRate(float64(v)))
 		case int:
 			opts = append(opts, smartWithSampleRate(float64(v)))
+		}
+	}
+
+	if elm, ok := config["no-parallel-dial"]; ok {
+		if npd, ok := elm.(bool); ok {
+			opts = append(opts, smartWithNoParallelDial(npd))
 		}
 	}
 

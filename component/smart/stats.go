@@ -36,10 +36,10 @@ type AtomicStatsRecord struct {
 
 	weights         atomic.TypedValue[map[string]float64]
 	uploadTotal     *atomic.Float64
-    downloadTotal   *atomic.Float64
-    duration        *atomic.Float64
-    maxUploadRate   *atomic.Float64
-    maxDownloadRate *atomic.Float64
+	downloadTotal   *atomic.Float64
+	duration        *atomic.Float64
+	maxUploadRate   *atomic.Float64
+	maxDownloadRate *atomic.Float64
 }
 
 type AtomicRecordManager struct {
@@ -134,7 +134,7 @@ func (m *AtomicRecordManager) GetOrCreateAtomicRecord(cacheKey string, store *St
 	}
 
 	return record
-	}
+}
 
 // 创建统计快照
 func (record *AtomicStatsRecord) CreateStatsSnapshot() *StatsRecord {
@@ -692,7 +692,7 @@ func (s *Store) GetBestProxyForTarget(group, config string, target string, weigh
 	case coverageRatio >= 0.6:
 		requiredNodeCount = baseCount
 		if requiredNodeCount > 2 {
-			requiredNodeCount = (requiredNodeCount * 3) / 4  // 适当减少
+			requiredNodeCount = (requiredNodeCount * 3) / 4 // 适当减少
 		}
 	case coverageRatio >= 0.3:
 		requiredNodeCount = baseCount

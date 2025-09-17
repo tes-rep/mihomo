@@ -4,12 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-	"regexp"
 
 	"github.com/metacubex/mihomo/common/cmd"
 	"github.com/metacubex/mihomo/common/lru"
@@ -40,9 +40,9 @@ const (
 )
 
 const (
-	DefaultMinSampleCount   = 2
-	RetentionPeriod         = 14 * 24 * time.Hour
-	CacheMaxAge             = 21600
+	DefaultMinSampleCount = 2
+	RetentionPeriod       = 14 * 24 * time.Hour
+	CacheMaxAge           = 21600
 
 	MaxDomainsLimit         = 2000
 	MinDomainsLimit         = 300
@@ -123,13 +123,13 @@ type (
 	}
 
 	NodeState struct {
-		Name               string            `json:"name"`
-		FailureCount       int               `json:"failure_count"`
-		LastFailure        time.Time         `json:"last_failure"`
-		BlockedUntil       time.Time         `json:"blocked_until"`
-		Degraded           bool              `json:"degraded"`
-		DegradedFactor     float64           `json:"degraded_factor"`
-		DomainFailureCount map[string]int    `json:"domain_failure_count"` // 新增：记录每个域名的失败次数
+		Name               string         `json:"name"`
+		FailureCount       int            `json:"failure_count"`
+		LastFailure        time.Time      `json:"last_failure"`
+		BlockedUntil       time.Time      `json:"blocked_until"`
+		Degraded           bool           `json:"degraded"`
+		DegradedFactor     float64        `json:"degraded_factor"`
+		DomainFailureCount map[string]int `json:"domain_failure_count"` // 新增：记录每个域名的失败次数
 	}
 
 	RankingData struct {
@@ -181,7 +181,7 @@ func GetEffectiveDomain(host string, dstIP string) (string, string) {
 
 	compute := func() string {
 		parts := strings.Split(h, ".")
-		reg, err := publicsuffix.EffectiveTLDPlusOne(h)	
+		reg, err := publicsuffix.EffectiveTLDPlusOne(h)
 		if err != nil || reg == "" || reg == h || !(h == reg || strings.HasSuffix(h, "."+reg)) {
 			if len(parts) >= 2 {
 				reg = strings.Join(parts[len(parts)-2:], ".")
