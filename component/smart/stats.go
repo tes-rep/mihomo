@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"math"
+	"math/rand"
 	"sort"
 	"strings"
 	"sync"
@@ -1376,16 +1377,20 @@ func (s *Store) GetAllStats(group, config string, all bool) (map[string]map[stri
 	}
 
 	if len(result) > maxDomainsLimit {
-		trimmed := make(map[string]map[string][]byte)
-		count := 0
-		for domain, nodeStats := range result {
-			if count >= maxDomainsLimit {
-				break
-			}
-			trimmed[domain] = nodeStats
-			count++
+		rand.Seed(time.Now().UnixNano())
+		domains := make([]string, 0, len(result))
+		for domain := range result {
+			domains = append(domains, domain)
+		}
+		rand.Shuffle(len(domains), func(i, j int) {
+			domains[i], domains[j] = domains[j], domains[i]
+		})
+		trimmed := make(map[string]map[string][]byte, maxDomainsLimit)
+		for i := 0; i < maxDomainsLimit; i++ {
+			trimmed[domains[i]] = result[domains[i]]
 		}
 		result = trimmed
+		needUpdateCache = true
 	}
 
 	if hasQueueUpdates || needUpdateCache {
