@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"math/rand"
 	"os"
@@ -341,25 +342,21 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 
 	fillAvailableProxies := func(initialProxies []C.Proxy, allProxies []C.Proxy) []C.Proxy {
 		availableProxies := make([]C.Proxy, 0, len(initialProxies))
-		
+		seen := make(map[string]struct{})
+
 		for _, p := range initialProxies {
 			if p.SupportUDP() {
 				availableProxies = append(availableProxies, p)
+				seen[p.Name()] = struct{}{}
 			}
 		}
 
 		if len(availableProxies) < maxRetries && len(allProxies) >= maxRetries {
-			seen := make(map[string]struct{}, len(availableProxies))
-			for _, p := range availableProxies {
-				seen[p.Name()] = struct{}{}
-			}
-			
 			shuffledProxies := make([]C.Proxy, len(allProxies))
 			copy(shuffledProxies, allProxies)
 			rand.Shuffle(len(shuffledProxies), func(i, j int) {
 				shuffledProxies[i], shuffledProxies[j] = shuffledProxies[j], shuffledProxies[i]
 			})
-			
 			for _, fp := range shuffledProxies {
 				if len(availableProxies) >= maxRetries {
 					break
@@ -370,7 +367,24 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 				}
 			}
 		}
-		
+
+		if len(availableProxies) == 0 {
+			shuffledProxies := make([]C.Proxy, len(allProxies))
+			copy(shuffledProxies, allProxies)
+			rand.Shuffle(len(shuffledProxies), func(i, j int) {
+				shuffledProxies[i], shuffledProxies[j] = shuffledProxies[j], shuffledProxies[i]
+			})
+			for _, fp := range shuffledProxies {
+				if len(availableProxies) >= maxRetries {
+					break
+				}
+				if _, exists := seen[fp.Name()]; !exists {
+					availableProxies = append(availableProxies, fp)
+					seen[fp.Name()] = struct{}{}
+				}
+			}
+		}
+
 		return availableProxies
 	}
 
@@ -467,10 +481,23 @@ func (s *Smart) WrapConnWithMetric(c C.Conn, proxy C.Proxy, metadata *C.Metadata
 
 	start := time.Now()
 
+	var firstWriteErr error
+
+	c = callback.NewFirstWriteCallBackConn(c, func(err error) {
+		firstWriteErr = err
+	})
+
 	return callback.NewFirstReadCallBackConn(c, func(err error) {
 		latency := time.Since(start).Milliseconds()
+
 		if err == nil {
 			s.recordConnectionStats("success", metadata, proxy, connectTime, latency, 0, 0, 0, 0, 0, false, nil)
+		} else if err == io.EOF {
+			if firstWriteErr != nil && firstWriteErr != io.EOF {
+				s.recordConnectionStats("failed", metadata, proxy, connectTime, latency, 0, 0, 0, 0, 0, false, err)
+			} else {
+				s.recordConnectionStats("closed", metadata, proxy, connectTime, latency, 0, 0, 0, 0, 0, false, nil)
+			}
 		} else {
 			s.recordConnectionStats("failed", metadata, proxy, connectTime, 0, 0, 0, 0, 0, 0, false, err)
 		}
