@@ -496,7 +496,7 @@ func (s *Smart) WrapConnWithMetric(c C.Conn, proxy C.Proxy, metadata *C.Metadata
 			if firstWriteErr != nil && firstWriteErr != io.EOF {
 				s.recordConnectionStats("failed", metadata, proxy, connectTime, latency, 0, 0, 0, 0, 0, false, err)
 			} else {
-				s.recordConnectionStats("closed", metadata, proxy, connectTime, latency, 0, 0, 0, 0, 0, false, nil)
+				s.recordConnectionStats("success", metadata, proxy, connectTime, latency, 0, 0, 0, 0, 0, false, nil)
 			}
 		} else {
 			s.recordConnectionStats("failed", metadata, proxy, connectTime, 0, 0, 0, 0, 0, 0, false, err)
