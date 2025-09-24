@@ -247,6 +247,7 @@ func (s *Smart) singleDialContext(ctx context.Context, proxy C.Proxy, metadata *
 func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
 	availableProxies := s.GetProxies(true)
 	triedProxies := make(map[string]bool)
+	metadata.SmartBlock = "normal"
 
 	getBatch := func(proxies []C.Proxy, i int) ([]C.Proxy, time.Duration) {
 		const parallelDials = 3
@@ -337,6 +338,7 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (pc C.PacketConn, err error) {
 	proxies := s.GetProxies(true)
 	triedProxies := make(map[string]bool)
+	metadata.SmartBlock = "normal"
 
 	fillAvailableProxies := func(initialProxies []C.Proxy, allProxies []C.Proxy) []C.Proxy {
 		availableProxies := make([]C.Proxy, 0, len(initialProxies))
@@ -1677,7 +1679,12 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 	}
 
 	if status == "closed" {
-		if needCheckQuality {
+		if metadata.SmartBlock == "blocked" {
+			degradedWeight = math.Max(0.1, calculatedWeight*0.3)
+			isDegraded = true
+			log.Debugln("[Smart] SmartBlock triggered: [%s] for domain [%s], forcing weight degradation from %.4f to %.4f (%s)",
+				proxy.Name(), addressDisplay, calculatedWeight, degradedWeight, weightType)
+		} else if needCheckQuality {
 			historyMaxUploadRateKB := atomicRecord.Get("maxUploadRate").(float64)
 			historyMaxDownloadRateKB := atomicRecord.Get("maxDownloadRate").(float64)
 			historyUploadTotal := atomicRecord.Get("uploadTotal").(float64)
