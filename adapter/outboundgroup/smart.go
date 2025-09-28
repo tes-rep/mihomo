@@ -237,7 +237,7 @@ func (s *Smart) singleDialContext(ctx context.Context, proxy C.Proxy, metadata *
 	connectTime = time.Since(start).Milliseconds()
 
 	if err != nil && err != context.Canceled {
-		s.recordConnectionStats("failed", metadata, proxy, 0, 0, 0, 0, 0, 0, 0, false, err)
+		go s.recordConnectionStats("failed", metadata, proxy, 0, 0, 0, 0, 0, 0, 0, false, err)
 		return nil, 0, err
 	}
 
@@ -433,12 +433,12 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 
 		if err == nil {
 			pc.AppendToChains(s)
-			s.recordConnectionStats("success", metadata, proxy, connectTime, 0, 0, 0, 0, 0, 0, false, nil)
+			go s.recordConnectionStats("success", metadata, proxy, connectTime, 0, 0, 0, 0, 0, 0, false, nil)
 			pc = s.registerPacketClosureMetricsCallback(pc, proxy, metadata)
 			return pc, nil
 		}
 		finalErr = err
-		s.recordConnectionStats("failed", metadata, proxy, 0, 0, 0, 0, 0, 0, 0, false, err)
+		go s.recordConnectionStats("failed", metadata, proxy, 0, 0, 0, 0, 0, 0, 0, false, err)
 		if s.selected != "" && len(availableProxies) == 1 && availableProxies[0].Name() == s.selected {
 			break
 		}
@@ -485,15 +485,15 @@ func (s *Smart) WrapConnWithMetric(c C.Conn, proxy C.Proxy, metadata *C.Metadata
 		latency := time.Since(start).Milliseconds()
 
 		if err == nil {
-			s.recordConnectionStats("success", metadata, proxy, connectTime, latency, 0, 0, 0, 0, 0, false, nil)
+			go s.recordConnectionStats("success", metadata, proxy, connectTime, latency, 0, 0, 0, 0, 0, false, nil)
 		} else if err == io.EOF {
 			if firstWriteErr != nil && firstWriteErr != io.EOF {
-				s.recordConnectionStats("failed", metadata, proxy, connectTime, latency, 0, 0, 0, 0, 0, false, err)
+				go s.recordConnectionStats("failed", metadata, proxy, connectTime, latency, 0, 0, 0, 0, 0, false, err)
 			} else {
-				s.recordConnectionStats("success", metadata, proxy, connectTime, latency, 0, 0, 0, 0, 0, false, nil)
+				go s.recordConnectionStats("success", metadata, proxy, connectTime, latency, 0, 0, 0, 0, 0, false, nil)
 			}
 		} else {
-			s.recordConnectionStats("failed", metadata, proxy, connectTime, 0, 0, 0, 0, 0, 0, false, err)
+			go s.recordConnectionStats("failed", metadata, proxy, connectTime, 0, 0, 0, 0, 0, 0, false, err)
 		}
 	})
 }
@@ -904,7 +904,7 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy
 		// 检查解析缓存
 		if cachedProxyNames := s.store.GetUnwrapResult(s.Name(), s.configName, target); len(cachedProxyNames) != 0 {
 			if proxies := findProxiesByNames(cachedProxyNames); len(proxies) > 0 {
-				s.store.DeleteCacheResult(smart.KeyTypeUnwrap, s.Name(), s.configName, target)
+				s.store.DeleteCacheResult(smart.KeyTypeUnwrap, s.configName, s.Name(), target, "")
 				return proxies
 			}
 		}
@@ -917,7 +917,7 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy
 		}
 
 		// 实时计算最佳节点
-		bestNodes, _, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, target, weightType, false)
+		bestNodes, _, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, target, weightType)
 		if err == nil && len(bestNodes) != 0 {
 			if proxies := findProxiesByNames(bestNodes); len(proxies) > 0 {
 				return proxies
@@ -1248,8 +1248,6 @@ func (s *Smart) checkAndLimitStats(record *smart.AtomicStatsRecord) {
 // 记录保存
 func (s *Smart) saveStatsRecord(cacheKey, domain string, proxy C.Proxy, record *smart.StatsRecord, lastUsed time.Time) {
 	record.LastUsed = lastUsed
-
-	smart.SetCacheValue(cacheKey, record)
 
 	go func() {
 		if data, err := json.Marshal(record); err == nil {
@@ -1753,7 +1751,7 @@ func (s *Smart) registerClosureMetricsCallback(c C.Conn, proxy C.Proxy, metadata
 				maxUploadRate := info.MaxUploadRate.Load()
 				maxDownloadRate := info.MaxDownloadRate.Load()
 
-				s.recordConnectionStats("closed", metadata, proxy, 0, 0,
+				go s.recordConnectionStats("closed", metadata, proxy, 0, 0,
 					uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, false, nil)
 				return
 			}
@@ -1773,7 +1771,7 @@ func (s *Smart) registerPacketClosureMetricsCallback(pc C.PacketConn, proxy C.Pr
 				maxUploadRate := info.MaxUploadRate.Load()
 				maxDownloadRate := info.MaxDownloadRate.Load()
 
-				s.recordConnectionStats("closed", metadata, proxy, 0, 0,
+				go s.recordConnectionStats("closed", metadata, proxy, 0, 0,
 					uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, false, nil)
 				return
 			}
@@ -1818,7 +1816,7 @@ func (s *Smart) processLongConnections(threshold time.Duration) {
 			if uploadTotal > 0 || downloadTotal > 0 {
 				for _, p := range s.GetProxies(false) {
 					if p.Name() == proxyName {
-						s.recordConnectionStats("closed", info.Metadata, p, 0, 0,
+						go s.recordConnectionStats("closed", info.Metadata, p, 0, 0,
 							uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, true, nil)
 						break
 					}
@@ -1841,10 +1839,10 @@ func (s *Smart) cleanupDegradedNodePreferenceCache(metadata *C.Metadata, domain,
 	lock.Lock()
 	defer lock.Unlock()
 
-	s.store.DeleteCacheResult(smart.KeyTypePrefetch, s.Name(), s.configName, domain)
+	s.store.DeleteCacheResult(smart.KeyTypePrefetch, s.configName, s.Name(), domain, "")
 
 	// 处理域名相关缓存
-	bestNodes, bestWeights, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, domain, weightType, false)
+	bestNodes, bestWeights, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, domain, weightType)
 	var i int
 	for i = 0; i < len(bestNodes); i++ {
 		if bestNodes[i] != "" && bestNodes[i] != nodeName {
@@ -1876,9 +1874,9 @@ func (s *Smart) cleanupDegradedNodePreferenceCache(metadata *C.Metadata, domain,
 		}
 		fullAsnWeightType := asnWeightType + ":" + asnInfo
 
-		s.store.DeleteCacheResult(smart.KeyTypePrefetch, s.Name(), s.configName, asnInfo)
+		s.store.DeleteCacheResult(smart.KeyTypePrefetch, s.configName, s.Name(), asnInfo, "")
 
-		bestNodes, bestWeights, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, asnInfo, fullAsnWeightType, false)
+		bestNodes, bestWeights, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, asnInfo, fullAsnWeightType)
 		var i int
 		for i = 0; i < len(bestNodes); i++ {
 			if bestNodes[i] != "" && bestNodes[i] != nodeName {

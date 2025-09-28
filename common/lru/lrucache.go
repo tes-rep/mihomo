@@ -296,6 +296,7 @@ func (c *LruCache[K, V]) FilterByKeyPrefix(prefix string) map[string]V {
 	defer c.mu.Unlock()
 
 	result := make(map[string]V)
+	now := time.Now().Unix()
 
 	for k, le := range c.cache {
 		keyStr, ok := any(k).(string)
@@ -303,11 +304,20 @@ func (c *LruCache[K, V]) FilterByKeyPrefix(prefix string) map[string]V {
 			continue
 		}
 
-		if strings.HasPrefix(keyStr, prefix) {
-			e := le.Value
-			result[keyStr] = e.value
+		if !strings.HasPrefix(keyStr, prefix) {
+			continue
 		}
+
+		if !c.staleReturn && c.maxAge > 0 && le.Value.expires <= now {
+			c.deleteElement(le)
+			continue
+		}
+
+		e := le.Value
+		result[keyStr] = e.value
 	}
+
+	c.maybeDeleteOldest()
 
 	return result
 }

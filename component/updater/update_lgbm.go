@@ -94,6 +94,7 @@ func UpdateLgbmModel() (err error) {
 	}
 
 	defer func() {
+		log.Infoln("[Smart] LightGBM model update completed")
 		lightgbm.ReloadModel()
 	}()
 
@@ -125,7 +126,6 @@ func UpdateLgbmModelDatabase() error {
 		return err
 	}
 
-	log.Infoln("[Smart] LightGBM model update completed")
 	return nil
 }
 

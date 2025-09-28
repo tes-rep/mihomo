@@ -89,6 +89,8 @@ var (
 	memoryLimitOnce   sync.Once
 
 	domainCache *lru.LruCache[string, string]
+
+	prefixCountCache *lru.LruCache[string, int]
 )
 
 type (
