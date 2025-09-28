@@ -100,6 +100,7 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	updateExperimental(cfg.Experimental)
 	updateUsers(cfg.Users)
 	closeSmart()
+	initSmart(cfg.Profile, cfg.Proxies)
 	updateProxies(cfg.Proxies, cfg.Providers)
 	updateRules(cfg.Rules, cfg.SubRules, cfg.RuleProviders)
 	updateSniffer(cfg.Sniffer)
@@ -111,8 +112,6 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	updateTun(cfg.General) // tun should not care "force"
 	updateIPTables(cfg)
 	updateTunnels(cfg.Tunnels)
-
-	initSmart(cfg.Profile, cfg.Proxies)
 
 	tunnel.OnInnerLoading()
 
