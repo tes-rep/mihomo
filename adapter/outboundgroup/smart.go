@@ -943,7 +943,6 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy
 		// 检查解析缓存
 		if cachedProxyNames := s.store.GetUnwrapResult(s.Name(), s.configName, target); len(cachedProxyNames) != 0 {
 			if proxies := findProxiesByNames(cachedProxyNames); len(proxies) > 0 {
-				s.store.DeleteCacheResult(smart.KeyTypeUnwrap, s.configName, s.Name(), target, "")
 				return proxies
 			}
 		}

@@ -2,6 +2,7 @@ package smart
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"strings"
 	"time"
@@ -38,12 +39,17 @@ func InitCache() {
 
 	prefixCountCache = lru.New[string, int](
 		lru.WithSize[string, int](2000),
-		lru.WithAge[string, int](int64(300)),
+		lru.WithAge[string, int](300),
 	)
 
 	nodeStatesCache = lru.New[string, map[string][]byte](
-		lru.WithSize[string, map[string][]byte](1000),
-		lru.WithAge[string, map[string][]byte](int64(300)),
+		lru.WithSize[string, map[string][]byte](2000),
+		lru.WithAge[string, map[string][]byte](120),
+	)
+
+	unwrapCache = lru.New[string, []string](
+		lru.WithSize[string, []string](500),
+		lru.WithAge[string, []string](2),
 	)
 }
 
@@ -248,8 +254,8 @@ func (s *Store) StoreUnwrapResult(group, config string, target string, proxyName
 		return
 	}
 
-	key := FormatCacheKey(KeyTypeUnwrap, config, group, target)
-	SetCacheValue(key, proxyNames)
+	key := fmt.Sprintf("%s:%s:%s", config, group, target)
+	unwrapCache.Set(key, proxyNames)
 }
 
 func (s *Store) GetUnwrapResult(group, config string, target string) []string {
@@ -257,11 +263,9 @@ func (s *Store) GetUnwrapResult(group, config string, target string) []string {
 		return nil
 	}
 
-	key := FormatCacheKey(KeyTypeUnwrap, config, group, target)
-	if value, ok := GetCacheValue(key); ok {
-		if proxyNames, ok := value.([]string); ok {
-			return proxyNames
-		}
+	key := fmt.Sprintf("%s:%s:%s", config, group, target)
+	if value, ok := unwrapCache.Get(key); ok {
+		return value
 	}
 
 	return nil
@@ -374,14 +378,19 @@ func (s *Store) AdjustCacheParameters() {
 	)
 
 	prefixCountCache = lru.New[string, int](
-		lru.WithSize[string, int](1000),
-		lru.WithAge[string, int](int64(300)),
+		lru.WithSize[string, int](2000),
+		lru.WithAge[string, int](300),
 	)
 
 	nodeStatesCache = lru.New[string, map[string][]byte](
-		lru.WithSize[string, map[string][]byte](1000),
-		lru.WithAge[string, map[string][]byte](int64(300)),
+		lru.WithSize[string, map[string][]byte](2000),
+		lru.WithAge[string, map[string][]byte](120),
 	)
+
+	unwrapCache = lru.New[string, []string](
+        lru.WithSize[string, []string](500),
+        lru.WithAge[string, []string](2),
+    )
 
 	var entries map[string]interface{}
 	var preserveRatio float64
@@ -485,14 +494,12 @@ func ClearCacheByLevel(level string, config string, group string) {
 	if level == "all" {
 		RemoveCacheValuesByPrefix("")
 	} else if level == "config" {
-		RemoveCacheValuesByPrefix(FormatCacheKey(KeyTypeUnwrap, config, ""))
 		RemoveCacheValuesByPrefix(FormatCacheKey(KeyTypeFailed, config, ""))
 		RemoveCacheValuesByPrefix(FormatCacheKey(KeyTypeNode, config, ""))
 		RemoveCacheValuesByPrefix(FormatCacheKey(KeyTypeStats, config, ""))
 		RemoveCacheValuesByPrefix(FormatCacheKey(KeyTypeRanking, config, ""))
 		RemoveCacheValuesByPrefix(FormatCacheKey(KeyTypePrefetch, config, ""))
 	} else if level == "group" {
-		RemoveCacheValuesByPrefix(FormatCacheKey(KeyTypeUnwrap, config, group, ""))
 		RemoveCacheValuesByPrefix(FormatCacheKey(KeyTypeFailed, config, group, ""))
 		RemoveCacheValuesByPrefix(FormatCacheKey(KeyTypeNode, config, group, ""))
 		RemoveCacheValuesByPrefix(FormatCacheKey(KeyTypeStats, config, group, ""))
@@ -505,6 +512,8 @@ func ClearCacheByLevel(level string, config string, group string) {
 	prefixCountCache.Clear()
 
 	nodeStatesCache.Clear()
+
+	unwrapCache.Clear()
 }
 
 // 从数据库路径提取缓存键

@@ -28,7 +28,6 @@ const (
 
 const (
 	KeyTypePrefetch = "prefetch"
-	KeyTypeUnwrap   = "unwrap"
 	KeyTypeFailed   = "failed"
 	KeyTypeNode     = "node"
 	KeyTypeStats    = "stats"
@@ -93,6 +92,8 @@ var (
 	prefixCountCache *lru.LruCache[string, int]
 
 	nodeStatesCache *lru.LruCache[string, map[string][]byte]
+
+	unwrapCache *lru.LruCache[string, []string]
 )
 
 type (
