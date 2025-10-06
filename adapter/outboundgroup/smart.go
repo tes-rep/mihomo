@@ -1155,7 +1155,7 @@ func (s *Smart) checkNodeQualityDegradation(
 
 	// 零流量连接
 	if connectionDuration > 100 && downloadTotal == 0 && uploadTotal == 0 {
-		degradedWeight := math.Max(0.1, newWeight*0.3)
+		degradedWeight := math.Max(0.1, newWeight*0.1)
 		log.Debugln("[Smart] Connection [%s] - [%s] - [%s] - [%s] detected zero-traffic, degrade weight from %.4f to %.4f",
 			s.Name(), proxyName, weightType, addressDisplay, newWeight, degradedWeight)
 		return degradedWeight, true
@@ -1183,7 +1183,7 @@ func (s *Smart) checkNodeQualityDegradation(
 			atomicRecord.Set("status", int64(status))
 			if err == nil && !ok {
 				if status == 403 || status == 429 || status == 407 || status == 599 {
-					degradedWeight := math.Max(0.1, newWeight*0.3)
+					degradedWeight := math.Max(0.1, newWeight*0.1)
 					log.Debugln("[Smart] Connection [%s] - [%s] - [%s] - [%s] detected abnormal response [%d], degrade weight from %.4f to %.4f",
 						s.Name(), proxyName, weightType, addressDisplay, status, newWeight, degradedWeight)
 					return degradedWeight, true
@@ -1743,7 +1743,7 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 
 	if status == "closed" {
 		if metadata.SmartBlock == "blocked" {
-			degradedWeight = math.Max(0.1, calculatedWeight*0.3)
+			degradedWeight = math.Max(0.1, calculatedWeight*0.1)
 			isDegraded = true
 			log.Debugln("[Smart] Connection [%s] - [%s] - [%s] - [%s] detected manual block, degrade weight from %.4f to %.4f",
 				s.Name(), proxy.Name(), weightType, addressDisplay, calculatedWeight, degradedWeight)

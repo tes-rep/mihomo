@@ -42,7 +42,7 @@ func CalculateWeight(success, failure, connectTime, latency int64, isUDP bool, u
 	durationMinutes := connectionDuration
 
 	// 3. 场景识别和参数获取
-	sceneType := identifyConnectionScene(isUDP, latency, uploadMB, downloadMB, maxUploadRateKB, maxDownloadRateKB, durationMinutes, connectTime)
+	sceneType := identifyConnectionScene(isUDP, latency, uploadMB, downloadMB, maxUploadRateKB, maxDownloadRateKB, durationMinutes)
 
 	var params SceneParams
 	if p, ok := presetSceneParams[sceneType]; ok {
@@ -61,8 +61,6 @@ func CalculateWeight(success, failure, connectTime, latency int64, isUDP bool, u
 	// 5. 对所有历史数据应用时间衰减
 	decayedSuccess := float64(success) * timeFactor
 	decayedFailure := float64(failure) * timeFactor
-	decayedConnectTime := float64(connectTime) * timeFactor
-	decayedLatency := float64(latency) * timeFactor
 	decayedTotal := decayedSuccess + decayedFailure
 
 	if decayedTotal < 1.0 {
@@ -71,17 +69,24 @@ func CalculateWeight(success, failure, connectTime, latency int64, isUDP bool, u
 		decayedTotal = decayedSuccess + decayedFailure
 	}
 
-	if decayedConnectTime < 1.0 {
-		decayedConnectTime = 1.0
-	}
-	if decayedLatency < 1.0 {
-		decayedLatency = 1.0
+	// 6. 基础指标计算
+	if connectTime <= 0 {
+		connectTime = 500
 	}
 
-	// 6. 基础指标计算
+	if latency <= 0 {
+		latency = 500
+	}
+
 	successRate := decayedSuccess / decayedTotal
-	connectScore := 1.0 / decayedConnectTime
-	latencyScore := 1.0 / decayedLatency
+	connectScore := math.Exp(-float64(connectTime)/1000.0) * timeFactor
+	latencyScore := math.Exp(-float64(latency)/1000.0) * timeFactor
+
+	connectScore = math.Min(1, connectScore)
+	latencyScore = math.Min(1, latencyScore)
+
+	connectScore = math.Max(0.3, connectScore)
+	latencyScore = math.Max(0.3, latencyScore)
 
 	// 7. UDP协议调整
 	if isUDP {
@@ -145,7 +150,7 @@ func CalculateWeight(success, failure, connectTime, latency int64, isUDP bool, u
 	if (sceneType == "streaming" || sceneType == "transfer") && downloadMB > 20 {
 		qualityBonus += 0.1
 	}
-	if sceneType == "interactive" && latency > 0 && latency < 300 && successRate > 0.9 {
+	if sceneType == "interactive" && latency > 0 && latency < 100 && successRate > 0.9 {
 		qualityBonus += 0.1
 	}
 
@@ -158,35 +163,41 @@ func CalculateWeight(success, failure, connectTime, latency int64, isUDP bool, u
 }
 
 // 识别连接的使用场景类型
-func identifyConnectionScene(isUDP bool, latency int64, uploadMB, downloadMB, maxUploadRateKB, maxDownloadRateKB, durationMinutes float64, connectTime int64) string {
+func identifyConnectionScene(isUDP bool, latency int64, uploadMB, downloadMB, maxUploadRateKB, maxDownloadRateKB, durationMinutes float64) string {
 	const (
-		SceneInteractive = "interactive" // gaming和voicevideo
-		SceneStreaming   = "streaming"   // 流媒体
-		SceneTransfer    = "transfer"    // filetransfer和大流量场景
-		SceneWeb         = "web"         // browsing和api
+		SceneInteractive = "interactive" // 游戏/互动场景
+		SceneStreaming   = "streaming"   // 流媒体场景
+		SceneTransfer    = "transfer"    // 大流量传输场景
+		SceneWeb         = "web"         // Web场景
 	)
 
 	// 游戏/互动场景特征：低延迟，持续连接，流量相对平衡
 	if (isUDP && latency < 150 && durationMinutes > 3 &&
 		uploadMB > 0.2 && downloadMB > 0.2 &&
-		maxUploadRateKB > 200 && maxDownloadRateKB > 200) ||
+		maxUploadRateKB > 200 && maxDownloadRateKB > 200 &&
+		(uploadMB+downloadMB)/durationMinutes > 0.1 && (uploadMB+downloadMB)/durationMinutes < 10) ||
 		(!isUDP && latency < 250 && durationMinutes > 3 &&
 			uploadMB > 0.1 && downloadMB > 0.1 &&
 			uploadMB < 150 && downloadMB < 150 &&
 			(uploadMB/downloadMB > 0.2) && (uploadMB/downloadMB < 5) &&
-			maxUploadRateKB > 150 && maxDownloadRateKB > 150) {
+			maxUploadRateKB > 150 && maxDownloadRateKB > 150 &&
+			(uploadMB+downloadMB)/durationMinutes > 0.05 && (uploadMB+downloadMB)/durationMinutes < 15) {
 		return SceneInteractive
 	}
 
-	// 大流量传输场景 - 适应多CDN环境，单连接流量阈值降低
+	// 大流量传输场景
 	if (uploadMB > 100 || downloadMB > 100 || maxUploadRateKB > 5000) && durationMinutes > 0.5 {
-		return SceneTransfer
+		totalThroughput := (uploadMB + downloadMB) / durationMinutes
+		if totalThroughput > 5 {
+			return SceneTransfer
+		}
 	}
 
 	// 流媒体场景
 	if durationMinutes > 1 {
-		if (downloadMB > 60 && downloadMB/uploadMB > 3 && maxDownloadRateKB > 2000 && maxDownloadRateKB/maxUploadRateKB > 4) ||
-			(downloadMB > 15 && downloadMB/uploadMB > 3 && maxDownloadRateKB > 1000 && maxDownloadRateKB/maxUploadRateKB > 3) {
+		downloadThroughput := downloadMB / durationMinutes
+		if ((downloadMB > 60 && downloadMB/uploadMB > 3 && maxDownloadRateKB > 2000 && maxDownloadRateKB/maxUploadRateKB > 4 && downloadThroughput > 5) ||
+			(downloadMB > 15 && downloadMB/uploadMB > 3 && maxDownloadRateKB > 1000 && maxDownloadRateKB/maxUploadRateKB > 3 && downloadThroughput > 2)) {
 			return SceneStreaming
 		}
 	}
