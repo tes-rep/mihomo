@@ -20,7 +20,11 @@ on:
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true
-  
+
+permissions:
+  contents: write
+  packages: write
+
 env:
   REGISTRY: ghcr.io
 jobs:
