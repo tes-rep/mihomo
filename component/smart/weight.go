@@ -71,11 +71,11 @@ func CalculateWeight(success, failure, connectTime, latency int64, isUDP bool, u
 
 	// 6. 基础指标计算
 	if connectTime <= 0 {
-		connectTime = 100
+		connectTime = 500
 	}
 
 	if latency <= 0 {
-		latency = 100
+		latency = 500
 	}
 
 	successRate := decayedSuccess / decayedTotal
