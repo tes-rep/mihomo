@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/metacubex/mihomo/common/lru"
-	"github.com/metacubex/mihomo/constant"
+	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
 	"github.com/metacubex/mihomo/tunnel"
 )
@@ -47,9 +47,14 @@ func InitCache() {
 		lru.WithAge[string, map[string][]byte](120),
 	)
 
-	unwrapCache = lru.New[string, []string](
-		lru.WithSize[string, []string](500),
-		lru.WithAge[string, []string](2),
+	unwrapCache = lru.New[string, []C.Proxy](
+		lru.WithSize[string, []C.Proxy](500),
+		lru.WithAge[string, []C.Proxy](2),
+	)
+
+	recordCache = lru.New[string, *AtomicStatsRecord](
+		lru.WithSize[string, *AtomicStatsRecord](globalCacheParams.MaxDomains / 2),
+		lru.WithAge[string, *AtomicStatsRecord](CacheMaxAge),
 	)
 }
 
@@ -159,33 +164,15 @@ func (s *Store) GetPrefetchResult(group, config string, target string, weightTyp
 		}
 	}
 
-	cacheKey := FormatCacheKey(KeyTypePrefetch, config, group, target)
-	if value, ok := GetCacheValue(cacheKey); ok {
-		switch v := value.(type) {
-		case PrefetchMap:
-			if res, exists := v[weightType]; exists {
-				if len(res.Nodes) > 0 && len(res.Weights) == len(res.Nodes) {
-					return res.Nodes, res.Weights
-				}
-			}
-		case []byte:
-			var pm PrefetchMap
-			if json.Unmarshal(v, &pm) == nil {
-				if res, exists := pm[weightType]; exists {
-					if len(res.Nodes) > 0 && len(res.Weights) == len(res.Nodes) {
-						return res.Nodes, res.Weights
-					}
-				}
-			}
-		}
+	pathPrefix := FormatDBKey("smart", KeyTypePrefetch, config, group, target)
+	rawResult, err := s.GetSubBytesByPath(pathPrefix)
+	if err != nil {
+		return nil, nil
 	}
 
-	dbKey := FormatDBKey("smart", KeyTypePrefetch, config, group, target)
-	data, err := s.DBViewGetItem(dbKey)
-	if err == nil && data != nil {
+	for _, data := range rawResult {
 		var prefetchMap PrefetchMap
-		if err = json.Unmarshal(data, &prefetchMap); err == nil {
-			SetCacheValue(cacheKey, data)
+		if err := json.Unmarshal(data, &prefetchMap); err == nil {
 			if res, exists := prefetchMap[weightType]; exists {
 				if len(res.Nodes) > 0 && len(res.Weights) == len(res.Nodes) {
 					return res.Nodes, res.Weights
@@ -249,16 +236,16 @@ func (s *Store) LoadAllPrefetchResults(group, config string, limit int) int {
 	return loadCount
 }
 
-func (s *Store) StoreUnwrapResult(group, config string, target string, proxyNames []string) {
-	if target == "" || len(proxyNames) == 0 {
+func (s *Store) StoreUnwrapResult(group, config string, target string, proxies []C.Proxy) {
+	if target == "" || len(proxies) == 0 {
 		return
 	}
 
 	key := fmt.Sprintf("%s:%s:%s", config, group, target)
-	unwrapCache.Set(key, proxyNames)
+	unwrapCache.Set(key, proxies)
 }
 
-func (s *Store) GetUnwrapResult(group, config string, target string) []string {
+func (s *Store) GetUnwrapResult(group, config string, target string) []C.Proxy {
 	if target == "" {
 		return nil
 	}
@@ -305,7 +292,7 @@ func (s *Store) AdjustCacheParameters() {
 
 	smartGroupCount := 0
 	for _, proxy := range tunnel.Proxies() {
-		if proxy.Type() == constant.Smart {
+		if proxy.Type() == C.Smart {
 			smartGroupCount++
 		}
 	}
@@ -387,10 +374,15 @@ func (s *Store) AdjustCacheParameters() {
 		lru.WithAge[string, map[string][]byte](120),
 	)
 
-	unwrapCache = lru.New[string, []string](
-        lru.WithSize[string, []string](500),
-        lru.WithAge[string, []string](2),
-    )
+	unwrapCache = lru.New[string, []C.Proxy](
+		lru.WithSize[string, []C.Proxy](500),
+		lru.WithAge[string, []C.Proxy](2),
+	)
+
+	recordCache = lru.New[string, *AtomicStatsRecord](
+		lru.WithSize[string, *AtomicStatsRecord](globalCacheParams.MaxDomains / 2),
+		lru.WithAge[string, *AtomicStatsRecord](CacheMaxAge),
+	)
 
 	var entries map[string]interface{}
 	var preserveRatio float64
@@ -463,7 +455,7 @@ func (s *Store) AdjustCacheParameters() {
 }
 
 // 预加载数据
-func (s *Store) PreloadFrequentData(group, config string, proxies []string) {
+func (s *Store) PreloadFrequentData(group, config string) {
 	log.Infoln("[SmartStore] Starting data preloading for group [%s], config [%s]", group, config)
 
 	globalCacheParams.mutex.RLock()
@@ -481,7 +473,7 @@ func (s *Store) PreloadFrequentData(group, config string, proxies []string) {
 		nodeStatesCount = len(stateData)
 	}
 
-	ranking, _ := s.GetNodeWeightRanking(group, config, true, proxies)
+	ranking, _ := s.GetNodeWeightRankingCache(group, config)
 
 	domains := s.GetActiveDomains(group, config, domainLimit)
 
@@ -514,6 +506,8 @@ func ClearCacheByLevel(level string, config string, group string) {
 	nodeStatesCache.Clear()
 
 	unwrapCache.Clear()
+
+	recordCache.Clear()
 }
 
 // 从数据库路径提取缓存键

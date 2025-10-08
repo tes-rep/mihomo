@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,20 +41,20 @@ const (
 	flushQueueInterval       = 300 * time.Second
 	rankingInterval          = 60 * time.Minute
 
-	failureRecovery5min  = 5 * time.Minute
-	failureRecovery10min = 10 * time.Minute
-	failureRecovery15min = 15 * time.Minute
-	failureRecovery30min = 30 * time.Minute
+	failureRecovery5min      = 5 * time.Minute
+	failureRecovery10min     = 10 * time.Minute
+	failureRecovery15min     = 15 * time.Minute
+	failureRecovery30min     = 30 * time.Minute
 
-	longConnThreshold = 10 * time.Minute
-
-	maxRetries              = 3
+	maxRetries               = 3
+	maxSelected              = 9
+	allowedWeight            = 0.4
 )
 
 var (
 	longConnProcessGroup singleflight.Group[interface{}]
 	flushQueueOnce       atomic.Bool
-	smartInitOnce        sync.Once
+	taskInitOnce         sync.Once
 	preloadOnce          sync.Once
 	asnAvailable         bool
 )
@@ -126,6 +127,11 @@ type priorityRule struct {
 	isRegex bool
 }
 
+type nodeWeight struct {
+	name   string
+	weight float64
+}
+
 func getConfigFilename() string {
 	configFile := C.Path.Config()
 	baseName := filepath.Base(configFile)
@@ -133,7 +139,7 @@ func getConfigFilename() string {
 	return filename
 }
 
-func NewSmart(option *GroupCommonOption, providers []provider.ProxyProvider, strategy string, options ...smartOption) (*Smart, error) {
+func NewSmart(option *GroupCommonOption, providers []provider.ProxyProvider, strategy string, config map[string]any, options ...smartOption) (*Smart, error) {
 	if strategy != "round-robin" && strategy != "sticky-sessions" {
 		return nil, fmt.Errorf("%w: %s", errStrategy, strategy)
 	}
@@ -186,6 +192,8 @@ func NewSmart(option *GroupCommonOption, providers []provider.ProxyProvider, str
 	for _, option := range options {
 		option(s)
 	}
+
+	s.InitSmart(config)
 
 	return s, nil
 }
@@ -335,12 +343,9 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 
 			if err == nil {
 				return s.WrapConnWithMetric(c, p, metadata, connectTime), nil
-				c.AppendToChains(s)
-				return c, nil
 			}
 			finalErr = err
-			
-			
+
 			if s.selected != "" && len(proxies) == 1 && proxies[0].Name() == s.selected {
 				break
 			}
@@ -489,13 +494,7 @@ func (s *Smart) Unwrap(metadata *C.Metadata, touch bool) C.Proxy {
 
 	proxies = s.selectProxies(metadata, proxies)
 	domain, _ := smart.GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
-	if domain != "" {
-		names := make([]string, 0, len(proxies))
-		for _, p := range proxies {
-			names = append(names, p.Name())
-		}
-		s.store.StoreUnwrapResult(s.Name(), s.configName, domain, names)
-	}
+	s.store.StoreUnwrapResult(s.Name(), s.configName, domain, proxies)
 
 	return proxies[0]
 }
@@ -510,31 +509,23 @@ func (s *Smart) SupportUDP() bool {
 
 func (s *Smart) WrapConnWithMetric(c C.Conn, proxy C.Proxy, metadata *C.Metadata, connectTime int64) C.Conn {
 	c.AppendToChains(s)
-	c = s.registerClosureMetricsCallback(c, proxy, metadata)
 
 	start := time.Now()
 
 	var firstWriteErr error
+	var firstReadErr error
+	var firstReadLatency int64
 
 	c = callback.NewFirstWriteCallBackConn(c, func(err error) {
 		firstWriteErr = err
 	})
 
-	return callback.NewFirstReadCallBackConn(c, func(err error) {
-		latency := time.Since(start).Milliseconds()
-
-		if err == nil {
-			go s.recordConnectionStats("success", metadata, proxy, connectTime, latency, 0, 0, 0, 0, 0, false, nil)
-		} else if err == io.EOF {
-			if firstWriteErr != nil && firstWriteErr != io.EOF {
-				go s.recordConnectionStats("failed", metadata, proxy, connectTime, latency, 0, 0, 0, 0, 0, false, err)
-			} else {
-				go s.recordConnectionStats("success", metadata, proxy, connectTime, latency, 0, 0, 0, 0, 0, false, nil)
-			}
-		} else {
-			go s.recordConnectionStats("failed", metadata, proxy, connectTime, 0, 0, 0, 0, 0, 0, false, err)
-		}
+	c = callback.NewFirstReadCallBackConn(c, func(err error) {
+		firstReadLatency = time.Since(start).Milliseconds()
+		firstReadErr = err
 	})
+
+	return s.registerClosureMetricsCallback(c, proxy, metadata, connectTime, firstReadLatency, firstReadErr, firstWriteErr)
 }
 
 func (s *Smart) Set(name string) error {
@@ -572,7 +563,7 @@ func (s *Smart) Now() string {
 	return "Smart - Select"
 }
 
-func (s *Smart) InitCache() {
+func (s *Smart) InitSmart(config map[string]any) {
 	cacheFile := cachefile.Cache()
 	if cacheFile == nil || cacheFile.DB == nil {
 		log.Fatalln("[Smart] DB Cache file is nil for group %s", s.Name())
@@ -591,7 +582,7 @@ func (s *Smart) InitCache() {
 
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 
-	smartInitOnce.Do(func() {
+	taskInitOnce.Do(func() {
 		s.startTimedTask(5*time.Minute, checkInterval, "Clean up groups", s.cleanupOrphanedGroups, true)
 		s.startTimedTask(5*time.Minute, cacheParamAdjustInterval, "Cache parameter adjustment", s.store.AdjustCacheParameters, false)
 		s.startTimedTask(5*time.Minute, flushQueueInterval, "Queue flush", func() {
@@ -605,19 +596,11 @@ func (s *Smart) InitCache() {
 		preloadOnce.Do(func() {
 			s.store.AdjustCacheParameters()
 		})
-		proxies := s.GetProxies(false)
-		proxyNames := make([]string, 0, len(proxies))
-		for _, p := range proxies {
-			proxyNames = append(proxyNames, p.Name())
-		}
-		s.store.PreloadFrequentData(s.Name(), s.configName, proxyNames)
+		s.store.PreloadFrequentData(s.Name(), s.configName)
 	}, true)
 	s.startTimedTask(5*time.Minute, prefetchInterval, "prefetch", s.runPrefetch, false)
 	s.startTimedTask(30*time.Second, rankingInterval, "ranking", s.updateNodeRanking, false)
 	s.startTimedTask(5*time.Minute, recoveryCheckInterval, "Recovery check", s.checkAndRecoverDegradedNodes, false)
-	s.startTimedTask(10*time.Minute, checkInterval, "long connection processing", func() {
-		s.processLongConnections(longConnThreshold)
-	}, false)
 	s.startTimedTask(5*time.Minute, cleanupInterval, "Expired cleanup", func() {
 		_ = s.store.CleanupExpiredStats(s.Name(), s.configName)
 	}, false)
@@ -630,7 +613,7 @@ func (s *Smart) InitCache() {
 	}
 
 	if s.collectData {
-		s.dataCollector = lightgbm.GetCollector()
+		s.dataCollector = lightgbm.GetCollector(config)
 
 		s.startTimedTask(10*time.Minute, 30*time.Minute, "Flush data collector", func() {
 			if s.dataCollector != nil {
@@ -645,6 +628,14 @@ func (s *Smart) startTimedTask(initialDelay, interval time.Duration, taskName st
 	go func() {
 		defer s.wg.Done()
 
+		for tunnel.Status() != tunnel.Running {
+			select {
+			case <-time.After(100 * time.Millisecond):
+			case <-s.ctx.Done():
+				return
+			}
+		}
+
 		jitterRange := 30.0
 		intervalJitter := time.Duration(rand.Float64() * jitterRange * float64(time.Second))
 
@@ -657,7 +648,9 @@ func (s *Smart) startTimedTask(initialDelay, interval time.Duration, taskName st
 			return
 		}
 
-		task()
+		if tunnel.Status() == tunnel.Running {
+			task()
+		}
 
 		if runOnce {
 			log.Debugln("[Smart] Task %s for group [%s] set to run once, exiting",
@@ -671,7 +664,9 @@ func (s *Smart) startTimedTask(initialDelay, interval time.Duration, taskName st
 		for {
 			select {
 			case <-ticker.C:
-				task()
+				if tunnel.Status() == tunnel.Running {
+					task()
+				}
 			case <-s.ctx.Done():
 				return
 			}
@@ -698,7 +693,7 @@ func (s *Smart) updateNodeRanking() {
 	for _, p := range proxies {
 		proxyNames = append(proxyNames, p.Name())
 	}
-	ranking, err := s.store.GetNodeWeightRanking(s.Name(), s.configName, false, proxyNames)
+	ranking, err := s.store.GetNodeWeightRanking(s.Name(), s.configName, proxyNames)
 	if err != nil {
 		log.Warnln("[Smart] Failed to update node ranking: %v", err)
 		return
@@ -861,8 +856,8 @@ func (s *Smart) selectFallbacks(metadata *C.Metadata, proxies []C.Proxy) []C.Pro
 	fallbacks = append(fallbacks, proxies[piv:]...)
 	fallbacks = append(fallbacks, proxies[:piv]...)
 
-	if len(fallbacks) > 9 {
-		fallbacks = fallbacks[:9]
+	if len(fallbacks) > maxSelected {
+		fallbacks = fallbacks[:maxSelected]
 	}
 
 	return fallbacks
@@ -910,21 +905,39 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy
 		return proxies
 	}
 
-	fillProxies := func(selected []C.Proxy, all []C.Proxy, minCount int) []C.Proxy {
+	fillProxies := func(selected []C.Proxy, weights map[string]float64, all []C.Proxy, minCount int) []C.Proxy {
+		filtered := make([]C.Proxy, 0, len(selected))
+		for _, p := range selected {
+			if weights == nil || weights[p.Name()] >= allowedWeight {
+				filtered = append(filtered, p)
+			}
+		}
+		selected = filtered
+
 		if len(selected) >= minCount {
-			return selected
+			return selected[:minCount]
 		}
 		if len(all) == len(selected) {
 			return selected
 		}
-		selectedNames := make(map[string]struct{}, len(selected))
+
+		selectedNames := make(map[string]bool, len(selected))
 		for _, p := range selected {
-			selectedNames[p.Name()] = struct{}{}
+			selectedNames[p.Name()] = true
 		}
+
 		remain := make([]C.Proxy, 0)
+		fallbackProxy := s.fallback.Unwrap(metadata, true)
 		for _, p := range all {
-			if _, exists := selectedNames[p.Name()]; !exists {
-				remain = append(remain, p)
+			if !blockedNodes[p.Name()] && !selectedNames[p.Name()] {
+				if w, exists := weights[p.Name()]; weights == nil || (exists && w >= allowedWeight) || !exists {
+					if fallbackProxy.Name() == p.Name() {
+						selected = append([]C.Proxy{fallbackProxy}, selected...)
+						selectedNames[fallbackProxy.Name()] = true
+						continue
+					}
+					remain = append(remain, p)
+				}
 			}
 		}
 		rand.Shuffle(len(remain), func(i, j int) {
@@ -939,30 +952,40 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy
 		return selected
 	}
 
-	trySelector := func(target string, weightType string) []C.Proxy {
+	trySelector := func(target string, weightType string) ([]C.Proxy, map[string]float64) {
 		// 检查解析缓存
-		if cachedProxyNames := s.store.GetUnwrapResult(s.Name(), s.configName, target); len(cachedProxyNames) != 0 {
-			if proxies := findProxiesByNames(cachedProxyNames); len(proxies) > 0 {
-				return proxies
-			}
-		}
+		if cachedProxies := s.store.GetUnwrapResult(s.Name(), s.configName, target); len(cachedProxies) > 0 {
+            return cachedProxies, nil
+        }
 
 		// 检查预解析缓存
-		if cachedProxyNames, _ := s.store.GetPrefetchResult(s.Name(), s.configName, target, weightType); len(cachedProxyNames) != 0 {
+		if cachedProxyNames, cachedWeights := s.store.GetPrefetchResult(s.Name(), s.configName, target, weightType); len(cachedProxyNames) != 0 {
 			if proxies := findProxiesByNames(cachedProxyNames); len(proxies) > 0 {
-				return proxies
+				weights := make(map[string]float64)
+				for i, name := range cachedProxyNames {
+					if i < len(cachedWeights) {
+						weights[name] = cachedWeights[i]
+					}
+				}
+				return proxies, weights
 			}
 		}
 
 		// 实时计算最佳节点
-		bestNodes, _, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, target, weightType)
+		bestNodes, bestWeights, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, target, weightType)
 		if err == nil && len(bestNodes) != 0 {
 			if proxies := findProxiesByNames(bestNodes); len(proxies) > 0 {
-				return proxies
+				weights := make(map[string]float64)
+				for i, name := range bestNodes {
+					if i < len(bestWeights) {
+						weights[name] = bestWeights[i]
+					}
+				}
+				return proxies, weights
 			}
 		}
 
-		return nil
+		return nil, nil
 	}
 
 	// 尝试使用ASN信息选择
@@ -976,17 +999,19 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy
 				asnWeightType = smart.WeightTypeUDPASN + ":" + asnNumber
 			}
 
-			if selected := trySelector(asnNumber, asnWeightType); len(selected) > 0 {
-				return fillProxies(selected, proxies, 9)
+			if selected, weights := trySelector(asnNumber, asnWeightType); len(selected) > 0 {
+				if result := fillProxies(selected, weights, proxies, maxSelected); len(result) > 0 {
+					return result
+				}
 			}
 		}
 	}
 
 	// 尝试使用域名信息选择
 	domain, _ := smart.GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
-	if domain != "" {
-		if selected := trySelector(domain, weightType); len(selected) > 0 {
-			return fillProxies(selected, proxies, 9)
+	if selected, weights := trySelector(domain, weightType); len(selected) > 0 {
+		if result := fillProxies(selected, weights, proxies, maxSelected); len(result) > 0 {
+			return result
 		}
 	}
 
@@ -1095,18 +1120,8 @@ func (s *Smart) getHistoryConnectStats(metadata *C.Metadata, proxy C.Proxy) (his
 		return 0
 	}
 	domain, _ := smart.GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
-	if domain == "" {
-		return 0
-	}
 	cacheKey := smart.FormatCacheKey(smart.KeyTypeStats, s.configName, s.Name(), domain, proxy.Name())
-	atomicManager := smart.GetAtomicManager()
-	if atomicManager == nil {
-		return 0
-	}
-	atomicRecord := atomicManager.GetOrCreateAtomicRecord(cacheKey, s.store, s.Name(), s.configName, domain, proxy.Name())
-	if atomicRecord == nil {
-		return 0
-	}
+	atomicRecord := s.store.GetOrCreateAtomicRecord(cacheKey, s.Name(), s.configName, domain, proxy.Name())
 	historyConnectTime, _ = atomicRecord.Get("connectTime").(int64)
 	return
 }
@@ -1123,7 +1138,7 @@ func (s *Smart) checkNodeQualityDegradation(
 
 	// 零流量连接
 	if connectionDuration > 100 && downloadTotal == 0 && uploadTotal == 0 {
-		degradedWeight := math.Max(0.1, newWeight*0.3)
+		degradedWeight := math.Max(0.1, newWeight*0.1)
 		log.Debugln("[Smart] Connection [%s] - [%s] - [%s] - [%s] detected zero-traffic, degrade weight from %.4f to %.4f",
 			s.Name(), proxyName, weightType, addressDisplay, newWeight, degradedWeight)
 		return degradedWeight, true
@@ -1151,7 +1166,7 @@ func (s *Smart) checkNodeQualityDegradation(
 			atomicRecord.Set("status", int64(status))
 			if err == nil && !ok {
 				if status == 403 || status == 429 || status == 407 || status == 599 {
-					degradedWeight := math.Max(0.1, newWeight*0.3)
+					degradedWeight := math.Max(0.1, newWeight*0.1)
 					log.Debugln("[Smart] Connection [%s] - [%s] - [%s] - [%s] detected abnormal response [%d], degrade weight from %.4f to %.4f",
 						s.Name(), proxyName, weightType, addressDisplay, status, newWeight, degradedWeight)
 					return degradedWeight, true
@@ -1537,48 +1552,33 @@ func updateAverageValue(oldValue int64, newValue int64, count int64) int64 {
 
 func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy C.Proxy,
 	connectTime int64, latency int64, uploadTotal int64, downloadTotal int64, maxUploadRate int64, maxDownloadRate int64,
-	connectionDuration int64, fromLongConnProcess bool, err error) {
+	connectionDuration int64, newCloseCallback bool, err error) {
 
 	if proxy == nil {
 		return
 	}
 
 	domain, rawDomain := smart.GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
-	if domain == "" {
-		return
-	}
-
-	addressDisplay := rawDomain
-	if rawDomain != "" && domain != "" && rawDomain != domain {
-		addressDisplay = fmt.Sprintf("%s (Wildcard: %s)", rawDomain, domain)
-	}
-
-	if status == "failed" {
-		s.store.MarkConnectionFailed(s.Name(), s.configName, len(s.GetProxies(false)), map[string]bool{proxy.Name(): true}, metadata)
-	} else if status == "success" {
-		s.store.MarkConnectionSuccess(s.Name(), s.configName)
-	}
-
 	cacheKey := smart.FormatCacheKey(smart.KeyTypeStats, s.configName, s.Name(), domain, proxy.Name())
+
+	lock := smart.GetDomainNodeLock(domain, s.Name(), proxy.Name())
+	lock.Lock()
+	defer lock.Unlock()
+
+	atomicRecord := s.store.GetOrCreateAtomicRecord(cacheKey, s.Name(), s.configName, domain, proxy.Name())
+
+	asnInfo := s.getASNCode(metadata)
 	priorityFactor := s.getPriorityFactor(proxy.Name())
+
 	weightType := smart.WeightTypeTCP
 	if metadata.NetWork == C.UDP {
 		weightType = smart.WeightTypeUDP
 	}
 
-	asnInfo := s.getASNCode(metadata)
-	lock := smart.GetDomainNodeLock(domain, s.Name(), proxy.Name())
-	lock.Lock()
-	defer lock.Unlock()
-
-	atomicManager := smart.GetAtomicManager()
-	if atomicManager == nil {
-		return
-	}
-
-	atomicRecord := atomicManager.GetOrCreateAtomicRecord(cacheKey, s.store, s.Name(), s.configName, domain, proxy.Name())
-	if atomicRecord == nil {
-		return
+	if status == "failed" {
+		go s.store.MarkConnectionFailed(s.Name(), s.configName, len(s.GetProxies(false)), map[string]bool{proxy.Name(): true}, metadata)
+	} else if status == "success" || newCloseCallback {
+		go s.store.MarkConnectionSuccess(s.Name(), s.configName)
 	}
 
 	var baseWeight, calculatedWeight, oldWeight, uploadTotalMB, downloadTotalMB, maxUploadRateKB, maxDownloadRateKB float64
@@ -1634,6 +1634,25 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 
 		needDataCollection = s.collectData && s.dataCollector != nil
 	case "closed":
+		success := atomicRecord.Get("success").(int64)
+		// registerClosureMetricsCallback may call with connectTime and latency
+		if newCloseCallback {
+			atomicRecord.Add("success", int64(1))
+			success = atomicRecord.Get("success").(int64)
+
+			if connectTime > 0 {
+				oldConnectTime := atomicRecord.Get("connectTime").(int64)
+				newConnectTime := updateAverageValue(oldConnectTime, connectTime, success)
+				atomicRecord.Set("connectTime", newConnectTime)
+			}
+
+			if latency > 0 {
+				oldLatency := atomicRecord.Get("latency").(int64)
+				newLatency := updateAverageValue(oldLatency, latency, success)
+				atomicRecord.Set("latency", newLatency)
+			}
+		}
+
 		weights := atomicRecord.Get("weights")
 		if weights != nil {
 			weightsMap := weights.(map[string]float64)
@@ -1645,13 +1664,11 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 		maxUploadRateKB = float64(maxUploadRate) / 1024.0
 		maxDownloadRateKB = float64(maxDownloadRate) / 1024.0
 
-		if !fromLongConnProcess {
-			atomicRecord.Add("uploadTotal", uploadTotalMB)
-			atomicRecord.Add("downloadTotal", downloadTotalMB)
+		atomicRecord.Add("uploadTotal", uploadTotalMB)
+		atomicRecord.Add("downloadTotal", downloadTotalMB)
 
-			if connectionDuration > 0 {
-				s.updateConnectionDuration(atomicRecord, connectionDuration)
-			}
+		if connectionDuration > 0 {
+			s.updateConnectionDuration(atomicRecord, connectionDuration)
 		}
 
 		oldMaxUploadRate := atomicRecord.Get("maxUploadRate").(float64)
@@ -1664,7 +1681,6 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 			atomicRecord.Set("maxDownloadRate", maxDownloadRateKB)
 		}
 
-		success := atomicRecord.Get("success").(int64)
 		failure := atomicRecord.Get("failure").(int64)
 		connectTimeVal := atomicRecord.Get("connectTime").(int64)
 		latencyVal := atomicRecord.Get("latency").(int64)
@@ -1709,13 +1725,18 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 	var degradedWeight float64
 	var isDegraded bool
 
+	addressDisplay := rawDomain
+	if rawDomain != "" && domain != "" && rawDomain != domain {
+		addressDisplay = fmt.Sprintf("%s (Wildcard: %s)", rawDomain, domain)
+	}
+
 	if status == "failed" {
 		degradedWeight, isDegraded = s.handleFailedConnection(proxy.Name(), cacheKey, domain, calculatedWeight, weightType)
 	}
 
 	if status == "closed" {
 		if metadata.SmartBlock == "blocked" {
-			degradedWeight = math.Max(0.1, calculatedWeight*0.3)
+			degradedWeight = math.Max(0.1, calculatedWeight*0.1)
 			isDegraded = true
 			log.Debugln("[Smart] Connection [%s] - [%s] - [%s] - [%s] detected manual block, degrade weight from %.4f to %.4f",
 				s.Name(), proxy.Name(), weightType, addressDisplay, calculatedWeight, degradedWeight)
@@ -1766,176 +1787,134 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 		s.saveStatsRecord(cacheKey, domain, proxy, statsSnapshot, time.Now())
 
 		// 日志输出
-		if !fromLongConnProcess {
-			s.logConnectionStats(status, statsSnapshot, metadata, baseWeight, priorityFactor, addressDisplay, proxy.Name(),
-				uploadTotalMB, downloadTotalMB, maxUploadRateKB, maxDownloadRateKB, connectionDuration, asnInfo, isModelPredicted)
-		}
+		s.logConnectionStats(status, statsSnapshot, metadata, baseWeight, priorityFactor, addressDisplay, proxy.Name(),
+			uploadTotalMB, downloadTotalMB, maxUploadRateKB, maxDownloadRateKB, connectionDuration, asnInfo, isModelPredicted)
 	}
 }
 
-func (s *Smart) registerClosureMetricsCallback(c C.Conn, proxy C.Proxy, metadata *C.Metadata) C.Conn {
+func (s *Smart) registerClosureMetricsCallback(c C.Conn, proxy C.Proxy, metadata *C.Metadata, connectTime int64, firstReadLatency int64, readErr error, firstWriteErr error) C.Conn {
 	return callback.NewCloseCallbackConn(c, func() {
-		if metadata.UUID != "" {
-			tracker := statistic.DefaultManager.Get(metadata.UUID)
-			if tracker != nil {
-				info := tracker.Info()
-				uploadTotal := info.UploadTotal.Load()
-				downloadTotal := info.DownloadTotal.Load()
-				connectionDuration := time.Since(info.Start).Milliseconds()
-				maxUploadRate := info.MaxUploadRate.Load()
-				maxDownloadRate := info.MaxDownloadRate.Load()
+		tracker := statistic.DefaultManager.Get(metadata.UUID)
+		if tracker != nil {
+			info := tracker.Info()
+			uploadTotal := info.UploadTotal.Load()
+			downloadTotal := info.DownloadTotal.Load()
+			connectionDuration := time.Since(info.Start).Milliseconds()
+			maxUploadRate := info.MaxUploadRate.Load()
+			maxDownloadRate := info.MaxDownloadRate.Load()
 
-				go s.recordConnectionStats("closed", metadata, proxy, 0, 0,
-					uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, false, nil)
-				return
+			if readErr == nil {
+				go s.recordConnectionStats("closed", metadata, proxy, connectTime, firstReadLatency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, true, nil)
+			} else if readErr == io.EOF {
+				if firstWriteErr != nil && firstWriteErr != io.EOF {
+					go s.recordConnectionStats("failed", metadata, proxy, connectTime, firstReadLatency, 0, 0, 0, 0, 0, false, readErr)
+				} else {
+					go s.recordConnectionStats("closed", metadata, proxy, connectTime, firstReadLatency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, true, nil)
+				}
+			} else {
+				go s.recordConnectionStats("failed", metadata, proxy, connectTime, firstReadLatency, 0, 0, 0, 0, 0, false, readErr)
 			}
+			return
 		}
 	})
 }
 
 func (s *Smart) registerPacketClosureMetricsCallback(pc C.PacketConn, proxy C.Proxy, metadata *C.Metadata) C.PacketConn {
 	return callback.NewCloseCallbackPacketConn(pc, func() {
-		if metadata.UUID != "" {
-			tracker := statistic.DefaultManager.Get(metadata.UUID)
-			if tracker != nil {
-				info := tracker.Info()
-				uploadTotal := info.UploadTotal.Load()
-				downloadTotal := info.DownloadTotal.Load()
-				connectionDuration := time.Since(info.Start).Milliseconds()
-				maxUploadRate := info.MaxUploadRate.Load()
-				maxDownloadRate := info.MaxDownloadRate.Load()
+		tracker := statistic.DefaultManager.Get(metadata.UUID)
+		if tracker != nil {
+			info := tracker.Info()
+			uploadTotal := info.UploadTotal.Load()
+			downloadTotal := info.DownloadTotal.Load()
+			connectionDuration := time.Since(info.Start).Milliseconds()
+			maxUploadRate := info.MaxUploadRate.Load()
+			maxDownloadRate := info.MaxDownloadRate.Load()
 
-				go s.recordConnectionStats("closed", metadata, proxy, 0, 0,
-					uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, false, nil)
-				return
-			}
+			go s.recordConnectionStats("closed", metadata, proxy, 0, 0,
+				uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, false, nil)
+			return
 		}
 	})
 }
 
-func (s *Smart) processLongConnections(threshold time.Duration) {
-	_, err, _ := longConnProcessGroup.Do(s.Name()+"-"+s.configName, func() (interface{}, error) {
-		statistic.DefaultManager.Range(func(t statistic.Tracker) bool {
-			info := t.Info()
-			if info == nil || len(info.Chain) < 2 {
-				return true
-			}
-
-			connectionAge := time.Since(info.Start)
-			if connectionAge < threshold {
-				return true
-			}
-
-			var throughThisPolicy bool
-			var proxyName string
-
-			for i, c := range info.Chain {
-				if c == s.Name() {
-					throughThisPolicy = true
-					proxyName = info.Chain[i-1]
-					break
-				}
-			}
-
-			if !throughThisPolicy || proxyName == "" {
-				return true
-			}
-
-			uploadTotal := info.UploadTotal.Load()
-			downloadTotal := info.DownloadTotal.Load()
-			connectionDuration := connectionAge.Milliseconds()
-			maxUploadRate := info.MaxUploadRate.Load()
-			maxDownloadRate := info.MaxDownloadRate.Load()
-
-			if uploadTotal > 0 || downloadTotal > 0 {
-				for _, p := range s.GetProxies(false) {
-					if p.Name() == proxyName {
-						go s.recordConnectionStats("closed", info.Metadata, p, 0, 0,
-							uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, true, nil)
-						break
-					}
-				}
-			}
-
-			return true
-		})
-		return nil, nil
-	})
-
-	if err != nil {
-		log.Debugln("[Smart] Error processing long connections: %v", err)
-	}
-
-}
-
-func (s *Smart) cleanupDegradedNodePreferenceCache(metadata *C.Metadata, domain, addressDisplay string, nodeName string, currentWeight float64, weightType string, asnInfo string) {
+func (s *Smart) cleanupDegradedNodePreferenceCache(metadata *C.Metadata, domain, addressDisplay, nodeName string, currentWeight float64, weightType, asnInfo string) {
 	lock := smart.GetDomainNodeLock(domain, s.Name(), nodeName)
 	lock.Lock()
 	defer lock.Unlock()
 
-	s.store.DeleteCacheResult(smart.KeyTypePrefetch, s.configName, s.Name(), domain, "")
-
-	// 处理域名相关缓存
-	bestNodes, bestWeights, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, domain, weightType)
-	var i int
-	for i = 0; i < len(bestNodes); i++ {
-		if bestNodes[i] != "" && bestNodes[i] != nodeName {
-			break
+	updatePrefetch := func(target, typeKey string, logPrefix string) {
+		nodes, weights := s.store.GetPrefetchResult(s.Name(), s.configName, target, typeKey)
+		if len(nodes) == 0 {
+			bestNodes, bestWeights, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, target, typeKey)
+			if err == nil && len(bestNodes) > 0 {
+				s.store.StorePrefetchResult(s.Name(), s.configName, target, typeKey, bestNodes, bestWeights)
+				nodeWeightPairs := make([]string, len(bestNodes))
+				for i := range bestNodes {
+					nodeWeightPairs[i] = fmt.Sprintf("%s: %.2f", bestNodes[i], bestWeights[i])
+				}
+				if logPrefix == "domain" {
+					log.Debugln("[Smart] Updated prefetch result for Group [%s]: %s [%s] => type [%s] => [%s]",
+						s.Name(), logPrefix, addressDisplay, typeKey, strings.Join(nodeWeightPairs, ", "))
+				} else {
+					log.Debugln("[Smart] Updated prefetch result for Group [%s]: %s [%s] => type [%s] => [%s]",
+						s.Name(), logPrefix, target, typeKey, strings.Join(nodeWeightPairs, ", "))
+				}
+				return
+			}
+			return
+		}
+		nodeWeightList := make([]nodeWeight, 0, len(nodes))
+		for i := range nodes {
+			nodeWeightList = append(nodeWeightList, nodeWeight{name: nodes[i], weight: weights[i]})
+		}
+		found := false
+		for i := range nodeWeightList {
+			if nodeWeightList[i].name == nodeName {
+				nodeWeightList[i].weight = currentWeight
+				found = true
+				break
+			}
+		}
+		if !found {
+			nodeWeightList = append(nodeWeightList, nodeWeight{name: nodeName, weight: currentWeight})
+		}
+		sort.Slice(nodeWeightList, func(i, j int) bool {
+			return nodeWeightList[i].weight > nodeWeightList[j].weight
+		})
+		sortedNodes := make([]string, 0, len(nodeWeightList))
+		sortedWeights := make([]float64, 0, len(nodeWeightList))
+		for _, nw := range nodeWeightList {
+			sortedNodes = append(sortedNodes, nw.name)
+			sortedWeights = append(sortedWeights, nw.weight)
+		}
+		s.store.StorePrefetchResult(s.Name(), s.configName, target, typeKey, sortedNodes, sortedWeights)
+		nodeWeightPairs := make([]string, len(sortedNodes))
+		for i := range sortedNodes {
+			nodeWeightPairs[i] = fmt.Sprintf("%s: %.2f", sortedNodes[i], sortedWeights[i])
+		}
+		if logPrefix == "domain" {
+			log.Debugln("[Smart] Updated prefetch result for Group [%s]: %s [%s] => type [%s] => [%s]",
+				s.Name(), logPrefix, addressDisplay, typeKey, strings.Join(nodeWeightPairs, ", "))
+		} else {
+			log.Debugln("[Smart] Updated prefetch result for Group [%s]: %s [%s] => type [%s] => [%s]",
+				s.Name(), logPrefix, target, typeKey, strings.Join(nodeWeightPairs, ", "))
 		}
 	}
-	if len(bestNodes) > i+1 {
-		bestNodes = append(bestNodes[:i], bestNodes[i+1:]...)
-		bestWeights = append(bestWeights[:i], bestWeights[i+1:]...)
-	} else {
-		bestNodes = bestNodes[:i]
-		bestWeights = bestWeights[:i]
-	}
-	if err == nil && len(bestNodes) > 0 && bestWeights[0] > currentWeight {
-		s.store.StorePrefetchResult(s.Name(), s.configName, domain, weightType, bestNodes, bestWeights)
-		nodeWeightPairs := make([]string, len(bestNodes))
-		for i := range bestNodes {
-			nodeWeightPairs[i] = fmt.Sprintf("%s: %.2f", bestNodes[i], bestWeights[i])
-		}
-		log.Debugln("[Smart] Added new prefetch result for Group [%s]: domain [%s] => type [%s] => [%s]",
-			s.Name(), domain, weightType, strings.Join(nodeWeightPairs, ", "))
-	}
 
-	// 处理ASN相关缓存
+	// 域名缓存
+	updatePrefetch(domain, weightType, "domain")
+
+	// ASN缓存
 	if asnInfo != "" {
 		asnWeightType := smart.WeightTypeTCPASN
 		if weightType == smart.WeightTypeUDP {
 			asnWeightType = smart.WeightTypeUDPASN
 		}
 		fullAsnWeightType := asnWeightType + ":" + asnInfo
-
-		s.store.DeleteCacheResult(smart.KeyTypePrefetch, s.configName, s.Name(), asnInfo, "")
-
-		bestNodes, bestWeights, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, asnInfo, fullAsnWeightType)
-		var i int
-		for i = 0; i < len(bestNodes); i++ {
-			if bestNodes[i] != "" && bestNodes[i] != nodeName {
-				break
-			}
-		}
-		if len(bestNodes) > i+1 {
-			bestNodes = append(bestNodes[:i], bestNodes[i+1:]...)
-			bestWeights = append(bestWeights[:i], bestWeights[i+1:]...)
-		} else {
-			bestNodes = bestNodes[:i]
-			bestWeights = bestWeights[:i]
-		}
-		if err == nil && len(bestNodes) > 0 && bestWeights[0] > currentWeight {
-			s.store.StorePrefetchResult(s.Name(), s.configName, asnInfo, fullAsnWeightType, bestNodes, bestWeights)
-			nodeWeightPairs := make([]string, len(bestNodes))
-			for i := range bestNodes {
-				nodeWeightPairs[i] = fmt.Sprintf("%s: %.2f", bestNodes[i], bestWeights[i])
-			}
-			log.Debugln("[Smart] Added new prefetch result for Group [%s]: ASN [%s] => type [%s] => [%s]",
-				s.Name(), asnInfo, fullAsnWeightType, strings.Join(nodeWeightPairs, ", "))
-		}
+		updatePrefetch(asnInfo, fullAsnWeightType, "ASN")
 	}
 
-	// 处理sticky-sessions的缓存
+	// sticky-sessions缓存
 	if s.fallback != nil && s.strategy == "sticky-sessions" {
 		s.fallback.ClearStickySession(metadata)
 	}
@@ -2088,7 +2067,7 @@ func (s *Smart) Close() error {
 
 	lightgbm.CloseAllCollectors()
 
-	smartInitOnce = sync.Once{}
+	taskInitOnce = sync.Once{}
 	preloadOnce = sync.Once{}
 
 	return nil

@@ -25,7 +25,6 @@ import (
 	"github.com/metacubex/mihomo/component/profile/cachefile"
 	"github.com/metacubex/mihomo/component/resolver"
 	"github.com/metacubex/mihomo/component/resource"
-	"github.com/metacubex/mihomo/component/smart/lightgbm"
 	"github.com/metacubex/mihomo/component/sniffer"
 	tlsC "github.com/metacubex/mihomo/component/tls"
 	"github.com/metacubex/mihomo/component/trie"
@@ -97,10 +96,9 @@ func ApplyConfig(cfg *config.Config, force bool) {
 		}
 	}
 
+	closeSmart()
 	updateExperimental(cfg.Experimental)
 	updateUsers(cfg.Users)
-	closeSmart()
-	initSmart(cfg.Profile, cfg.Proxies)
 	updateProxies(cfg.Proxies, cfg.Providers)
 	updateRules(cfg.Rules, cfg.SubRules, cfg.RuleProviders)
 	updateSniffer(cfg.Sniffer)
@@ -536,20 +534,6 @@ func updateIPTables(cfg *config.Config) {
 	}
 
 	log.Infoln("[IPTABLES] Setting iptables completed")
-}
-
-func initSmart(profile *config.Profile, proxies map[string]C.Proxy) {
-	cachefile.NewSmartStore(cachefile.Cache())
-	lightgbm.SetSmartCollectorSize(profile.SmartCollectorSize)
-
-	for _, proxy := range proxies {
-		if proxy.Type() == C.Smart {
-			if smart, ok := proxy.Adapter().(*outboundgroup.Smart); ok {
-				log.Infoln("[Smart] Initializing Smart Group: %s", proxy.Name())
-				smart.InitCache()
-			}
-		}
-	}
 }
 
 func closeSmart() {

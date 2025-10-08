@@ -24,29 +24,21 @@ var (
 	shardedLocksOnce sync.Once
 )
 
-var (
-	globalAtomicManager *AtomicRecordManager
-	atomicManagerOnce   sync.Once
-)
-
 type AtomicStatsRecord struct {
-	success     atomic.Int64
-	failure     atomic.Int64
-	connectTime atomic.Int64
-	latency     atomic.Int64
-	lastUsed    atomic.Int64
-	status      atomic.Int64
+	success         atomic.Int64
+	failure         atomic.Int64
+	connectTime     atomic.Int64
+	latency         atomic.Int64
+	lastUsed        atomic.Int64
+	status          atomic.Int64
 
-	weights         atomic.TypedValue[map[string]float64]
 	uploadTotal     *atomic.Float64
 	downloadTotal   *atomic.Float64
 	duration        *atomic.Float64
 	maxUploadRate   *atomic.Float64
 	maxDownloadRate *atomic.Float64
-}
 
-type AtomicRecordManager struct {
-	records sync.Map
+	weights         atomic.TypedValue[map[string]float64]
 }
 
 type domainLastUsed struct {
@@ -55,16 +47,17 @@ type domainLastUsed struct {
 	types    []string
 }
 
-type domainMinHeap []domainLastUsed
-
 type asnLastUsed struct {
 	asn      string
 	lastUsed time.Time
 	types    []string
 }
 
+type domainMinHeap []domainLastUsed
+
 type asnMinHeap []asnLastUsed
 
+// 域名节点锁
 func initShardedLocks() {
 	shardedLocksOnce.Do(func() {
 		for i := range shardedLocks {
@@ -73,7 +66,6 @@ func initShardedLocks() {
 	})
 }
 
-// 域名节点锁
 func GetDomainNodeLock(domain, group, proxyName string) *sync.RWMutex {
 	initShardedLocks()
 
@@ -86,17 +78,10 @@ func GetDomainNodeLock(domain, group, proxyName string) *sync.RWMutex {
 	return shardedLocks[hash&1023]
 }
 
-func GetAtomicManager() *AtomicRecordManager {
-	atomicManagerOnce.Do(func() {
-		globalAtomicManager = &AtomicRecordManager{}
-	})
-	return globalAtomicManager
-}
-
 // 获取或创建原子记录
-func (m *AtomicRecordManager) GetOrCreateAtomicRecord(cacheKey string, store *Store, groupName, configName, domain, proxyName string) *AtomicStatsRecord {
-	if value, ok := m.records.Load(cacheKey); ok {
-		return value.(*AtomicStatsRecord)
+func (s *Store) GetOrCreateAtomicRecord(cacheKey string, groupName, configName, domain, proxyName string) *AtomicStatsRecord {
+	if value, ok := recordCache.Get(cacheKey); ok {
+		return value
 	}
 
 	record := &AtomicStatsRecord{
@@ -110,7 +95,7 @@ func (m *AtomicRecordManager) GetOrCreateAtomicRecord(cacheKey string, store *St
 	record.lastUsed.Store(time.Now().Unix())
 	record.status.Store(0)
 
-	if existingData, err := store.GetStatsForDomain(groupName, configName, domain); err == nil {
+	if existingData, err := s.GetStatsForDomain(groupName, configName, domain, proxyName); err == nil {
 		if data, exists := existingData[proxyName]; exists {
 			var existingRecord StatsRecord
 			if json.Unmarshal(data, &existingRecord) == nil {
@@ -129,11 +114,7 @@ func (m *AtomicRecordManager) GetOrCreateAtomicRecord(cacheKey string, store *St
 		}
 	}
 
-	actual, loaded := m.records.LoadOrStore(cacheKey, record)
-	if loaded {
-		return actual.(*AtomicStatsRecord)
-	}
-
+	recordCache.Set(cacheKey, record)
 	return record
 }
 
@@ -282,42 +263,34 @@ func (r *AtomicStatsRecord) SetWeight(weightType string, value float64) {
 }
 
 // 获取节点权重排名
-func (s *Store) GetNodeWeightRanking(group, config string, onlyCache bool, proxies []string) (map[string]string, error) {
-	if onlyCache {
-		cacheKey := FormatCacheKey(KeyTypeRanking, config, group, "")
-		cachedData, ok := GetCacheValue(cacheKey)
-		if ok {
-			switch v := cachedData.(type) {
-			case []byte:
-				if len(v) > 0 {
-					var rankingData RankingData
-					if json.Unmarshal(v, &rankingData) == nil && len(rankingData.Ranking) > 0 {
-						return rankingData.Ranking, nil
-					}
-				}
-			case RankingData:
-				if len(v.Ranking) > 0 {
-					return v.Ranking, nil
-				}
-			case map[string]string:
-				if len(v) > 0 {
-					return v, nil
-				}
-			}
-		}
-
-		dbKey := FormatDBKey("smart", KeyTypeRanking, config, group, "")
-		data, err := s.DBViewGetItem(dbKey)
-		if err == nil && data != nil {
+func (s *Store) GetNodeWeightRankingCache(group, config string) (map[string]string, error) {
+	ops := getGlobalQueueSnapshot()
+	for _, op := range ops {
+		if op.Type == OpSaveRanking && op.Group == group && op.Config == config {
 			var rankingData RankingData
-			if json.Unmarshal(data, &rankingData) == nil && len(rankingData.Ranking) > 0 {
+			if err := json.Unmarshal(op.Data, &rankingData); err == nil && len(rankingData.Ranking) > 0 {
 				return rankingData.Ranking, nil
 			}
 		}
-
-		return make(map[string]string), nil
 	}
 
+	pathPrefix := FormatDBKey("smart", KeyTypeRanking, config, group, "")
+	rawResult, err := s.GetSubBytesByPath(pathPrefix)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, data := range rawResult {
+		var rankingData RankingData
+		if err := json.Unmarshal(data, &rankingData); err == nil && len(rankingData.Ranking) > 0 {
+			return rankingData.Ranking, nil
+		}
+	}
+
+	return make(map[string]string), nil
+}
+
+func (s *Store) GetNodeWeightRanking(group, config string, proxies []string) (map[string]string, error) {
 	var allNodes []string
 	if len(proxies) > 0 {
 		allNodes = proxies
@@ -612,7 +585,6 @@ func (s *Store) GetBestProxyForTarget(group, config string, target string, weigh
 	}
 
 	nodeStatesMap := make(map[string]NodeState)
-	allAvailableNodes := make([]string, 0)
 	stateData, _ := s.GetNodeStates(group, config)
 	for nodeName, data := range stateData {
 		var state NodeState
@@ -621,10 +593,8 @@ func (s *Store) GetBestProxyForTarget(group, config string, target string, weigh
 				continue
 			}
 			nodeStatesMap[nodeName] = state
-			allAvailableNodes = append(allAvailableNodes, nodeName)
 		}
 	}
-	availableNodesCount := len(allAvailableNodes)
 
 	nodesWithWeight := make(map[string]float64)
 	asnMode := strings.HasPrefix(weightType, WeightTypeTCPASN) || strings.HasPrefix(weightType, WeightTypeUDPASN)
@@ -689,126 +659,13 @@ func (s *Store) GetBestProxyForTarget(group, config string, target string, weigh
 		}
 	}
 
-	var requiredNodeCount int
-
-	baseCount := func() int {
-		switch {
-		case availableNodesCount <= 5:
-			return 2
-		case availableNodesCount <= 10:
-			return 4
-		case availableNodesCount <= 20:
-			return 6
-		case availableNodesCount <= 50:
-			return 8
-		default:
-			return 10
-		}
-	}()
-
-	coverageRatio := 0.0
-
-	if availableNodesCount > 0 {
-		coverageRatio = float64(len(nodesWithWeight)) / float64(availableNodesCount)
-	}
-
-	switch {
-	case coverageRatio >= 0.6:
-		requiredNodeCount = baseCount
-		if requiredNodeCount > 2 {
-			requiredNodeCount = (requiredNodeCount * 3) / 4
-		}
-	case coverageRatio >= 0.3:
-		requiredNodeCount = baseCount
-	case coverageRatio >= 0.1:
-		requiredNodeCount = baseCount + 1
-		if requiredNodeCount < 2 {
-			requiredNodeCount = 2
-		}
-	default:
-		requiredNodeCount = baseCount + 2
-		if requiredNodeCount < 3 {
-			requiredNodeCount = 3
-		}
-		if requiredNodeCount > availableNodesCount/2 {
-			requiredNodeCount = availableNodesCount / 2
-			if requiredNodeCount < 1 {
-				requiredNodeCount = 1
-			}
-		}
-	}
-
-	if len(nodesWithWeight) >= 3 {
-		var maxWeight, minWeight float64
-		first := true
-		for _, weight := range nodesWithWeight {
-			if first {
-				maxWeight = weight
-				minWeight = weight
-				first = false
-			} else {
-				if weight > maxWeight {
-					maxWeight = weight
-				}
-				if weight < minWeight {
-					minWeight = weight
-				}
-			}
-		}
-
-		if maxWeight > 0 && minWeight > 0 {
-			ratio := maxWeight / minWeight
-			switch {
-			case ratio >= 4.0:
-				requiredNodeCount = (requiredNodeCount * 2) / 3
-				if requiredNodeCount < 1 {
-					requiredNodeCount = 1
-				}
-			case ratio >= 2.0:
-				requiredNodeCount = (requiredNodeCount * 4) / 5
-				if requiredNodeCount < 1 {
-					requiredNodeCount = 1
-				}
-			case ratio >= 1.5:
-				requiredNodeCount = requiredNodeCount
-			case ratio < 1.3:
-				requiredNodeCount = requiredNodeCount + 1
-			}
-			if maxWeight < 0.8 {
-				requiredNodeCount = (requiredNodeCount * 3) / 4
-				if requiredNodeCount < 1 {
-					requiredNodeCount = 1
-				}
-			}
-			if maxWeight > 2.5 && ratio >= 1.8 {
-				requiredNodeCount = (requiredNodeCount * 3) / 4
-				if requiredNodeCount < 1 {
-					requiredNodeCount = 1
-				}
-			}
-		}
-	}
-
-	if requiredNodeCount > availableNodesCount/2 {
-		requiredNodeCount = availableNodesCount / 2
-		if requiredNodeCount < 1 {
-			requiredNodeCount = 1
-		}
-	}
-
-	if availableNodesCount > 1 && requiredNodeCount < 2 {
-		requiredNodeCount = 2
-	}
-
 	type nodeWeight struct {
 		name   string
 		weight float64
 	}
 	var nodeList []nodeWeight
 	for node, weight := range nodesWithWeight {
-		if weight >= 0.4 {
-			nodeList = append(nodeList, nodeWeight{node, weight})
-		}
+		nodeList = append(nodeList, nodeWeight{node, weight})
 	}
 
 	if len(nodeList) == 0 {
@@ -819,13 +676,9 @@ func (s *Store) GetBestProxyForTarget(group, config string, target string, weigh
 		return nodeList[i].weight > nodeList[j].weight
 	})
 
-	if len(nodeList) < requiredNodeCount {
-		return nil, nil, errors.New("not enough nodes with valid weights")
-	}
-
 	var bestNodes []string
 	var bestWeights []float64
-	for i := 0; i < len(nodeList) && i < 9; i++ {
+	for i := 0; i < len(nodeList); i++ {
 		bestNodes = append(bestNodes, nodeList[i].name)
 		bestWeights = append(bestWeights, nodeList[i].weight)
 	}
@@ -1226,35 +1079,26 @@ func (s *Store) GetNodeStates(group, config string) (map[string][]byte, error) {
 }
 
 // 获取域名的统计数据
-func (s *Store) GetStatsForDomain(group, config, domain string) (map[string][]byte, error) {
-	result := make(map[string][]byte)
+func (s *Store) GetStatsForDomain(group, config, domain, proxyName string) (map[string][]byte, error) {
+    result := make(map[string][]byte)
 
-	ops := getGlobalQueueSnapshot()
-	for _, op := range ops {
-		if op.Type == OpSaveStats && op.Group == group && op.Config == config && op.Domain == domain {
-			result[op.Node] = op.Data
-		}
-	}
+    ops := getGlobalQueueSnapshot()
+    for _, op := range ops {
+        if op.Type == OpSaveStats && op.Group == group && op.Config == config && op.Domain == domain && op.Node == proxyName {
+            result[proxyName] = op.Data
+            return result, nil
+        }
+    }
 
-	if len(result) > 0 {
-		return result, nil
-	}
+    pathKey := FormatDBKey("smart", KeyTypeStats, config, group, domain, proxyName)
+    rawResult, err := s.GetSubBytesByPath(pathKey)
+    if err != nil {
+        return nil, err
+    }
 
-	pathPrefix := FormatDBKey("smart", KeyTypeStats, config, group, domain, "")
-	rawResult, err := s.GetSubBytesByPath(pathPrefix)
-	if err != nil {
-		return nil, err
-	}
+    result[proxyName] = rawResult[pathKey]
 
-	for fullPath, data := range rawResult {
-		parts := strings.Split(fullPath, "/")
-		if len(parts) > 0 {
-			nodeName := parts[len(parts)-1]
-			result[nodeName] = data
-		}
-	}
-
-	return result, nil
+    return result, nil
 }
 
 // 获取所有统计数据
@@ -1295,37 +1139,6 @@ func (s *Store) GetAllStats(group, config string) (map[string]map[string][]byte,
 	}
 
 	return result, nil
-}
-
-// 获取所有域名记录
-func (s *Store) GetAllDomainRecords(group, config string) ([]DomainRecord, error) {
-	allStats, err := s.GetAllStats(group, config)
-	if err != nil {
-		return nil, err
-	}
-
-	var records []DomainRecord
-	for domain, nodeStats := range allStats {
-		for nodeName, data := range nodeStats {
-			var statsRecord StatsRecord
-			if err := json.Unmarshal(data, &statsRecord); err != nil {
-				continue
-			}
-
-			records = append(records, DomainRecord{
-				Key:      fmt.Sprintf("%s:%s:%s:%s", config, group, nodeName, domain),
-				Domain:   domain,
-				NodeName: nodeName,
-				LastUsed: statsRecord.LastUsed,
-			})
-		}
-	}
-
-	sort.Slice(records, func(i, j int) bool {
-		return records[i].LastUsed.After(records[j].LastUsed)
-	})
-
-	return records, nil
 }
 
 // 删除域名记录
@@ -1599,14 +1412,30 @@ func (s *Store) RemoveNodesData(group, config string, nodes []string) error {
 
 // 清理旧的域名记录
 func (s *Store) CleanupOldDomains(group, config string) error {
-	domains := make(map[string]time.Time)
-	domainRecords, err := s.GetAllDomainRecords(group, config)
+	statsPrefix := FormatDBKey("smart", KeyTypeStats, config, group, "")
+
+	globalCacheParams.mutex.RLock()
+	maxDomains := globalCacheParams.MaxDomains * 2
+	globalCacheParams.mutex.RUnlock()
+
+	statsData, err := s.DBViewPrefixScan(statsPrefix, -1)
 	if err != nil {
 		return err
 	}
-	for _, record := range domainRecords {
-		if lastUsed, exists := domains[record.Domain]; !exists || record.LastUsed.After(lastUsed) {
-			domains[record.Domain] = record.LastUsed
+
+	domainLastUsed := make(map[string]time.Time)
+	for path, data := range statsData {
+		parts := strings.Split(path, "/")
+		if len(parts) < 6 {
+			continue
+		}
+		domain := parts[len(parts)-2]
+		var statsRecord StatsRecord
+		if err := json.Unmarshal(data, &statsRecord); err != nil {
+			continue
+		}
+		if last, ok := domainLastUsed[domain]; !ok || statsRecord.LastUsed.After(last) {
+			domainLastUsed[domain] = statsRecord.LastUsed
 		}
 	}
 
@@ -1615,58 +1444,54 @@ func (s *Store) CleanupOldDomains(group, config string) error {
 		lastUsed time.Time
 	}
 	var domainList []domainInfo
-	for domain, lastUsed := range domains {
-		domainList = append(domainList, domainInfo{
-			domain:   domain,
-			lastUsed: lastUsed,
-		})
+	for domain, lastUsed := range domainLastUsed {
+		domainList = append(domainList, domainInfo{domain, lastUsed})
 	}
 	sort.Slice(domainList, func(i, j int) bool {
 		return domainList[i].lastUsed.Before(domainList[j].lastUsed)
 	})
 
-	globalCacheParams.mutex.RLock()
-	maxDomains := globalCacheParams.MaxDomains
-	globalCacheParams.mutex.RUnlock()
-	if maxDomains <= 0 {
-		maxDomains = MinDomainsLimit
+	if len(domainList) <= maxDomains {
+		return nil
 	}
-
-	if len(domainList) > maxDomains {
-		toDelete := domainList[:len(domainList)-maxDomains]
-
-		for _, info := range toDelete {
-			// 删除域名统计数据（缓存和DB）
-			err := s.DeleteDomainRecords(group, config, info.domain)
-			if err != nil {
-				log.Warnln("[SmartStore] Failed to delete domain [%s]: %v", info.domain, err)
-			}
-			// 同时清理预取结果（缓存和DB）
-			s.DeleteCacheResult(KeyTypePrefetch, config, group, info.domain, "")
+	toDelete := domainList[:len(domainList)-maxDomains]
+	for _, info := range toDelete {
+		err := s.DeleteDomainRecords(group, config, info.domain)
+		if err != nil {
+			log.Warnln("[SmartStore] Failed to delete domain [%s]: %v", info.domain, err)
 		}
-
-		log.Debugln("[SmartStore] Cleaned up [%d] old domain records, keeping the latest [%d] (group %s)",
-			len(toDelete), maxDomains, group)
+		s.DeleteCacheResult(KeyTypePrefetch, config, group, info.domain, "")
 	}
 
+	log.Debugln("[SmartStore] Cleaned up [%d] old domain records, keeping the latest [%d] (group %s)",
+		len(toDelete), maxDomains, group)
 	return nil
 }
 
 // 清理过期统计数据
 func (s *Store) CleanupExpiredStats(group, config string) error {
-	records, err := s.GetAllDomainRecords(group, config)
+	statsPrefix := FormatDBKey("smart", KeyTypeStats, config, group, "")
+	statsData, err := s.DBViewPrefixScan(statsPrefix, -1)
 	if err != nil {
 		return err
 	}
 
 	threshold := time.Now().Add(-RetentionPeriod)
 	var expiredDomains []string
-
 	domainLastUsed := make(map[string]time.Time)
-	for _, record := range records {
-		lastUsed, exists := domainLastUsed[record.Domain]
-		if !exists || record.LastUsed.After(lastUsed) {
-			domainLastUsed[record.Domain] = record.LastUsed
+
+	for path, data := range statsData {
+		parts := strings.Split(path, "/")
+		if len(parts) < 6 {
+			continue
+		}
+		domain := parts[len(parts)-2]
+		var statsRecord StatsRecord
+		if err := json.Unmarshal(data, &statsRecord); err != nil {
+			continue
+		}
+		if last, ok := domainLastUsed[domain]; !ok || statsRecord.LastUsed.After(last) {
+			domainLastUsed[domain] = statsRecord.LastUsed
 		}
 	}
 
@@ -1705,10 +1530,6 @@ func (s *Store) clearThrottlePrefix(prefix string) {
 
 func (s *Store) MarkConnectionFailed(group, config string, proxiesCount int, triedProxies map[string]bool, metadata *C.Metadata) {
 	domain, _ := GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
-	if domain == "" {
-		return
-	}
-	
 	n := &s.networkFailureManager
 	groupKey := fmt.Sprintf("%s:%s", group, config)
 	now := time.Now()

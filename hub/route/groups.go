@@ -134,22 +134,7 @@ func getGroupWeights(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	proxies := smartGroup.GetProxies(false)
-	proxyNames := make([]string, 0, len(proxies))
-	for _, p := range proxies {
-		proxyNames = append(proxyNames, p.Name())
-	}
-
-	if len(proxyNames) == 0 {
-		render.Status(r, http.StatusInternalServerError)
-		render.JSON(w, r, render.M{
-			"weights": map[string]string{},
-			"message": "No available proxies in this group",
-		})
-		return
-	}
-
-	weights, err := smartStore.GetStore().GetNodeWeightRanking(groupName, configName, true, proxyNames)
+	weights, err := smartStore.GetStore().GetNodeWeightRankingCache(groupName, configName)
 
 	if err != nil {
 		log.Warnln("[Smart] Failed to get weight ranking: %s", err.Error())
@@ -216,27 +201,14 @@ func getAllGroupWeights(w http.ResponseWriter, r *http.Request) {
 
 		configName := sg.GetConfigFilename()
 		groupName := sg.Name()
-		proxies := sg.GetProxies(false)
-
-		proxyNames := make([]string, 0, len(proxies))
-		for _, pp := range proxies {
-			proxyNames = append(proxyNames, pp.Name())
-		}
-
-		if len(proxyNames) == 0 {
-			mu.Lock()
-			result[groupName] = map[string]string{}
-			mu.Unlock()
-			continue
-		}
 
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(groupName, configName string, proxyNames []string) {
+		go func(groupName, configName string) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			weights, err := store.GetNodeWeightRanking(groupName, configName, true, proxyNames)
+			weights, err := store.GetNodeWeightRankingCache(groupName, configName)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -249,7 +221,7 @@ func getAllGroupWeights(w http.ResponseWriter, r *http.Request) {
 			} else {
 				result[groupName] = weights
 			}
-		}(groupName, configName, proxyNames)
+		}(groupName, configName)
 	}
 
 	wg.Wait()

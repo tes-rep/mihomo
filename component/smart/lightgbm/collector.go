@@ -17,7 +17,6 @@ var (
 	collectMutex                 sync.Mutex
 	globalCollector              *DataCollector
 	collectorInitOnce            sync.Once
-	configuredSmartCollectorSize int64
 )
 
 type DataCollector struct {
@@ -34,21 +33,14 @@ const (
 	defaultSmartCollectorSize = 100 * 1024 * 1024
 )
 
-func SetSmartCollectorSize(sizeMB float64) {
-	collectMutex.Lock()
-	defer collectMutex.Unlock()
-
-	if sizeMB <= 0 {
-		configuredSmartCollectorSize = defaultSmartCollectorSize
-		return
-	}
-
-	configuredSmartCollectorSize = int64(sizeMB * 1024 * 1024)
-}
-
-func GetCollector() *DataCollector {
+func GetCollector(config map[string]any) *DataCollector {
 	collectorInitOnce.Do(func() {
-		smartCollectorSize := configuredSmartCollectorSize
+		var smartCollectorSize int64
+		if config != nil {
+			if v, ok := config["smart-collector-size"].(float64); ok && v > 0 {
+				smartCollectorSize = int64(v * 1024 * 1024)
+			}
+		}
 		if smartCollectorSize <= 0 {
 			smartCollectorSize = defaultSmartCollectorSize
 		}

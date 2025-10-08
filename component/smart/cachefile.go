@@ -542,58 +542,88 @@ func (s *Store) GetSubBytesByPath(prefix string) (map[string][]byte, error) {
 		group = pathParts[3]
 	}
 
-	cachePrefix := FormatCacheKey(keyType, config, group)
-	cacheResults := GetCacheValuesByPrefix(cachePrefix)
-
-	if len(cacheResults) > 0 {
-		keys := make([]string, 0, len(cacheResults))
-		for key := range cacheResults {
-			keys = append(keys, key)
+	switch keyType {
+	case KeyTypeNode, KeyTypePrefetch:
+		if len(pathParts) == 5 && pathParts[4] != "" {
+			configMaxDomains = 1
 		}
-		rand.Shuffle(len(keys), func(i, j int) { keys[i], keys[j] = keys[j], keys[i] })
+	case KeyTypeRanking:
+		if len(pathParts) == 5 && pathParts[3] != "" {
+			configMaxDomains = 1
+		}
+	case KeyTypeStats:
+		if len(pathParts) == 6 && pathParts[5] != "" {
+			configMaxDomains = 1
+		}
+	}
 
-		for _, key := range keys {
-			if configMaxDomains > 0 && len(result) >= configMaxDomains {
-				break
+	cacheLookup := func(cacheKey string) (dbKey string, dataBytes []byte, ok bool) {
+		value, ok := GetCacheValue(cacheKey)
+		if !ok {
+			return "", nil, false
+		}
+		switch v := value.(type) {
+		case []byte:
+			if len(v) == 0 {
+				return "", nil, false
 			}
-
-			value := cacheResults[key]
-			var dataBytes []byte
-			switch v := value.(type) {
-			case []byte:
-				if len(v) == 0 {
-					continue
-				}
-				dataBytes = make([]byte, len(v))
-				copy(dataBytes, v)
-			default:
-				b, err := json.Marshal(v)
-				if err != nil || len(b) == 0 {
-					continue
-				}
-				dataBytes = b
+			dataBytes = make([]byte, len(v))
+			copy(dataBytes, v)
+		default:
+			b, err := json.Marshal(v)
+			if err != nil || len(b) == 0 {
+				return "", nil, false
 			}
-
-			parts := strings.Split(key, ":")
-			var dbKey string
-			if len(parts) >= 3 {
-				cacheGroup := parts[2]
-				if keyType == KeyTypeStats && len(parts) >= 5 {
-					dbKey = FormatDBKey("smart", keyType, config, cacheGroup, parts[3], parts[4])
-				} else if keyType != KeyTypeStats && len(parts) >= 4 {
-					dbKey = FormatDBKey("smart", keyType, config, cacheGroup, parts[3])
-				} else {
-					continue
-				}
+			dataBytes = b
+		}
+		parts := strings.Split(cacheKey, ":")
+		var cacheGroup string
+		if len(parts) >= 3 {
+			cacheGroup = parts[2]
+			if keyType == KeyTypeStats && len(parts) >= 5 {
+				dbKey = FormatDBKey("smart", keyType, config, cacheGroup, parts[3], parts[4])
+			} else if keyType != KeyTypeStats && len(parts) >= 4 {
+				dbKey = FormatDBKey("smart", keyType, config, cacheGroup, parts[3])
 			} else {
-				continue
+				return "", nil, false
+			}
+		} else {
+			return "", nil, false
+		}
+		return dbKey, dataBytes, true
+	}
+
+	if configMaxDomains == 1 {
+		cacheKey := strings.Join(pathParts[1:], ":")
+		dbKey, dataBytes, ok := cacheLookup(cacheKey)
+		if ok {
+			result[dbKey] = dataBytes
+			return result, nil
+		}
+	} else {
+		cachePrefix := FormatCacheKey(keyType, config, group)
+		cacheResults := GetCacheValuesByPrefix(cachePrefix)
+		if len(cacheResults) > 0 {
+			keys := make([]string, 0, len(cacheResults))
+			for key := range cacheResults {
+				keys = append(keys, key)
+			}
+			rand.Shuffle(len(keys), func(i, j int) { keys[i], keys[j] = keys[j], keys[i] })
+
+			for _, key := range keys {
+				if len(result) >= configMaxDomains {
+					break
+				}
+				dbKey, dataBytes, ok := cacheLookup(key)
+				if !ok {
+					continue
+				}
+				result[dbKey] = dataBytes
 			}
 
-			result[dbKey] = dataBytes
-		}
-
-		if configMaxDomains > 0 && len(result) >= configMaxDomains {
-			return result, nil
+			if len(result) >= configMaxDomains {
+				return result, nil
+			}
 		}
 	}
 
@@ -626,7 +656,7 @@ func (s *Store) GetSubBytesByPath(prefix string) (map[string][]byte, error) {
 		}
 		UpdateCacheFromDBResult(fullPath, data)
 		result[fullPath] = data
-		if configMaxDomains > 0 && len(result) >= configMaxDomains {
+		if len(result) >= configMaxDomains {
 			break
 		}
 	}
