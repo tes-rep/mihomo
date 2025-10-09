@@ -27,7 +27,7 @@ const (
 )
 
 var (
-	globalModel   *WeightModel
+	smartModel   *WeightModel
 	modelInitOnce sync.Once
 
 	reloadModelSF = singleflight.Group[bool]{StoreResult: false}
@@ -442,29 +442,29 @@ type ModelInput struct {
 
 func GetModel() *WeightModel {
 	modelInitOnce.Do(func() {
-		globalModel = &WeightModel{}
+		smartModel = &WeightModel{}
 
 		modelPath := C.Path.SmartModel()
 
 		if _, err := os.Stat(modelPath); err == nil {
-			if err := globalModel.loadModel(modelPath); err != nil {
+			if err := smartModel.loadModel(modelPath); err != nil {
 				log.Warnln("[Smart] Model.bin invalid, remove and download: %v", err)
 
 				if rmErr := os.Remove(modelPath); rmErr != nil {
 					log.Errorln("[Smart] Failed to remove invalid Model.bin: %v", rmErr)
-					globalModel = nil
+					smartModel = nil
 					return
 				}
 
 				if downloadErr := downloadModel(modelPath); downloadErr != nil {
 					log.Errorln("[Smart] Failed to download Model.bin: %v", downloadErr)
-					globalModel = nil
+					smartModel = nil
 					return
 				}
 
-				if reloadErr := globalModel.loadModel(modelPath); reloadErr != nil {
+				if reloadErr := smartModel.loadModel(modelPath); reloadErr != nil {
 					log.Errorln("[Smart] Failed to load downloaded Model.bin: %v", reloadErr)
-					globalModel = nil
+					smartModel = nil
 					return
 				}
 
@@ -476,13 +476,13 @@ func GetModel() *WeightModel {
 			log.Infoln("[Smart] Can't find Model.bin, start download")
 			if downloadErr := downloadModel(modelPath); downloadErr != nil {
 				log.Errorln("[Smart] Can't download Model.bin: %v", downloadErr)
-				globalModel = nil
+				smartModel = nil
 				return
 			}
 
-			if loadErr := globalModel.loadModel(modelPath); loadErr != nil {
+			if loadErr := smartModel.loadModel(modelPath); loadErr != nil {
 				log.Errorln("[Smart] Failed to load downloaded Model.bin: %v", loadErr)
-				globalModel = nil
+				smartModel = nil
 				return
 			}
 
@@ -490,7 +490,7 @@ func GetModel() *WeightModel {
 		}
 	})
 
-	return globalModel
+	return smartModel
 }
 
 func (m *WeightModel) loadModel(path string) error {
@@ -529,15 +529,15 @@ func (m *WeightModel) loadModel(path string) error {
 }
 
 func ReloadModel() {
-	if globalModel != nil {
+	if smartModel != nil {
 		success, err, shared := reloadModelSF.Do("reload", func() (bool, error) {
-			globalModel.mutex.Lock()
-			defer globalModel.mutex.Unlock()
+			smartModel.mutex.Lock()
+			defer smartModel.mutex.Unlock()
 
 			modelPath := C.Path.SmartModel()
 
 			if _, err := os.Stat(modelPath); err == nil {
-				if err := globalModel.loadModel(modelPath); err != nil {
+				if err := smartModel.loadModel(modelPath); err != nil {
 					log.Errorln("[Smart] Failed to reload Model.bin: %v", err)
 					return false, err
 				} else {

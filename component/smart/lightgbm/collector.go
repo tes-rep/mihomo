@@ -14,44 +14,42 @@ import (
 )
 
 var (
-	collectMutex                 sync.Mutex
-	globalCollector              *DataCollector
-	collectorInitOnce            sync.Once
+	collectMutex           sync.Mutex
+	smartCollector         *DataCollector
 )
 
 type DataCollector struct {
-	mutex              sync.Mutex
-	sampleCount        int
-	dataPath           string
-	file               *os.File
-	writer             *csv.Writer
-	configured         bool
-	smartCollectorSize int64
+	mutex                  sync.Mutex
+	sampleCount            int
+	dataPath               string
+	file                   *os.File
+	writer                 *csv.Writer
+	configured             bool
+	smartCollectorSize     int64
 }
 
 const (
 	defaultSmartCollectorSize = 100 * 1024 * 1024
 )
 
-func GetCollector(config map[string]any) *DataCollector {
-	collectorInitOnce.Do(func() {
-		var smartCollectorSize int64
-		if config != nil {
-			if v, ok := config["smart-collector-size"].(float64); ok && v > 0 {
-				smartCollectorSize = int64(v * 1024 * 1024)
-			}
-		}
-		if smartCollectorSize <= 0 {
-			smartCollectorSize = defaultSmartCollectorSize
-		}
+func InitCollector(collectSize float64) {
+	var smartCollectorSize int64
+	if collectSize > 0 {
+		smartCollectorSize = int64(collectSize * 1024 * 1024)
+	} else {
+		smartCollectorSize = defaultSmartCollectorSize
+	}
 
-		globalCollector = &DataCollector{
-			dataPath:           filepath.Join(C.Path.HomeDir(), "smart_weight_data.csv"),
-			smartCollectorSize: smartCollectorSize,
-		}
-	})
+	smartCollector = &DataCollector{
+		dataPath:           filepath.Join(C.Path.HomeDir(), "smart_weight_data.csv"),
+		smartCollectorSize: smartCollectorSize,
+	}
 
-	return globalCollector
+	log.Infoln("[Smart] Data collector initialized, max file size: %d MB", smartCollector.smartCollectorSize/(1024*1024))
+}
+
+func GetCollector() *DataCollector {
+	return smartCollector
 }
 
 func (c *DataCollector) AddSample(input *ModelInput, metadata *C.Metadata, actualWeight float64, weightSource string) {
@@ -278,7 +276,7 @@ func CloseAllCollectors() {
 	collectMutex.Lock()
 	defer collectMutex.Unlock()
 
-	if globalCollector != nil {
-		globalCollector.Close()
+	if smartCollector != nil {
+		smartCollector.Close()
 	}
 }

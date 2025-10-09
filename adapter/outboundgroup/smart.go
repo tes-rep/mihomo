@@ -52,7 +52,7 @@ const (
 
 var (
 	flushQueueOnce       atomic.Bool
-	taskInitOnce         sync.Once
+	smartInitOnce        sync.Once
 	preloadOnce          sync.Once
 	asnAvailable         bool
 )
@@ -137,7 +137,7 @@ func getConfigFilename() string {
 	return filename
 }
 
-func NewSmart(option *GroupCommonOption, providers []provider.ProxyProvider, strategy string, config map[string]any, options ...smartOption) (*Smart, error) {
+func NewSmart(option *GroupCommonOption, providers []provider.ProxyProvider, strategy string, options ...smartOption) (*Smart, error) {
 	if strategy != "round-robin" && strategy != "sticky-sessions" {
 		return nil, fmt.Errorf("%w: %s", errStrategy, strategy)
 	}
@@ -191,7 +191,7 @@ func NewSmart(option *GroupCommonOption, providers []provider.ProxyProvider, str
 		option(s)
 	}
 
-	s.InitSmart(config)
+	s.InitSmart()
 
 	return s, nil
 }
@@ -561,7 +561,7 @@ func (s *Smart) Now() string {
 	return "Smart - Select"
 }
 
-func (s *Smart) InitSmart(config map[string]any) {
+func (s *Smart) InitSmart() {
 	cacheFile := cachefile.Cache()
 	if cacheFile == nil || cacheFile.DB == nil {
 		log.Fatalln("[Smart] DB Cache file is nil for group %s", s.Name())
@@ -576,7 +576,7 @@ func (s *Smart) InitSmart(config map[string]any) {
 
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 
-	taskInitOnce.Do(func() {
+	smartInitOnce.Do(func() {
 		s.startTimedTask(5*time.Minute, checkInterval, "Clean up groups", s.cleanupOrphanedGroups, true)
 		s.startTimedTask(5*time.Minute, cacheParamAdjustInterval, "Cache parameter adjustment", s.store.AdjustCacheParameters, false)
 		s.startTimedTask(5*time.Minute, flushQueueInterval, "Queue flush", func() {
@@ -601,22 +601,19 @@ func (s *Smart) InitSmart(config map[string]any) {
 	s.startTimedTask(5*time.Minute, cleanupInterval, "OldDomains cleanup", func() {
 		_ = s.store.CleanupOldDomains(s.Name(), s.configName)
 	}, false)
+	s.startTimedTask(5*time.Second, checkInterval, "Init LGBM Collector", func() {
+		// load after tunnel.Running because size option ready later than group init
+		if s.collectData {
+			s.dataCollector = lightgbm.GetCollector()
+		}
+	}, true)
 
 	if s.useLightGBM {
 		s.weightModel = lightgbm.GetModel()
 	}
-
-	if s.collectData {
-		s.dataCollector = lightgbm.GetCollector(config)
-
-		s.startTimedTask(10*time.Minute, 30*time.Minute, "Flush data collector", func() {
-			if s.dataCollector != nil {
-				s.dataCollector.Flush()
-			}
-		}, false)
-	}
 }
 
+// task run after tunnel.Running
 func (s *Smart) startTimedTask(initialDelay, interval time.Duration, taskName string, task func(), runOnce bool) {
 	s.wg.Add(1)
 	go func() {
@@ -2061,7 +2058,7 @@ func (s *Smart) Close() error {
 
 	lightgbm.CloseAllCollectors()
 
-	taskInitOnce = sync.Once{}
+	smartInitOnce = sync.Once{}
 	preloadOnce = sync.Once{}
 
 	return nil
