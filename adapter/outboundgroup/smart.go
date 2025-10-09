@@ -19,7 +19,6 @@ import (
 
 	"github.com/dlclark/regexp2"
 	"github.com/metacubex/mihomo/common/callback"
-	"github.com/metacubex/mihomo/common/singleflight"
 	"github.com/metacubex/mihomo/common/utils"
 	"github.com/metacubex/mihomo/component/mmdb"
 	"github.com/metacubex/mihomo/component/profile/cachefile"
@@ -52,7 +51,6 @@ const (
 )
 
 var (
-	longConnProcessGroup singleflight.Group[interface{}]
 	flushQueueOnce       atomic.Bool
 	taskInitOnce         sync.Once
 	preloadOnce          sync.Once
@@ -575,10 +573,6 @@ func (s *Smart) InitSmart(config map[string]any) {
 	}
 
 	s.store = smartStore.GetStore()
-
-	if s.configName == "" {
-		s.configName = getConfigFilename()
-	}
 
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 
