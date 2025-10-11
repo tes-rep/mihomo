@@ -27,7 +27,7 @@ type (
 )
 
 // 计算权重
-func CalculateWeight(success, failure, connectTime, latency int64, isUDP bool, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration float64, lastConnectTimestamp int64) float64 {
+func CalculateWeight(connSuccess bool, success, failure, connectTime, latency int64, isUDP bool, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration float64, lastConnectTimestamp int64) float64 {
 	// 1. 检查样本数量
 	total := success + failure
 	if total < DefaultMinSampleCount {
@@ -70,12 +70,12 @@ func CalculateWeight(success, failure, connectTime, latency int64, isUDP bool, u
 	}
 
 	// 6. 基础指标计算
-	if connectTime <= 0 {
-		connectTime = 500
+	if connectTime == 0 && !connSuccess {
+		connectTime = 2000
 	}
 
-	if latency <= 0 {
-		latency = 500
+	if latency == 0 && !connSuccess {
+		latency = 2000
 	}
 
 	successRate := decayedSuccess / decayedTotal

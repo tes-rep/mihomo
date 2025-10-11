@@ -26,6 +26,7 @@ import (
 	"github.com/metacubex/mihomo/component/resolver"
 	"github.com/metacubex/mihomo/component/resource"
 	"github.com/metacubex/mihomo/component/sniffer"
+	"github.com/metacubex/mihomo/component/smart/lightgbm"
 	tlsC "github.com/metacubex/mihomo/component/tls"
 	"github.com/metacubex/mihomo/component/trie"
 	"github.com/metacubex/mihomo/component/updater"
@@ -97,6 +98,7 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	}
 
 	closeSmart()
+	updateSmartCollector(cfg.Profile)
 	updateExperimental(cfg.Experimental)
 	updateUsers(cfg.Users)
 	updateProxies(cfg.Proxies, cfg.Providers)
@@ -534,6 +536,10 @@ func updateIPTables(cfg *config.Config) {
 	}
 
 	log.Infoln("[IPTABLES] Setting iptables completed")
+}
+
+func updateSmartCollector(c *config.Profile) {
+	lightgbm.InitCollector(c.SmartCollectorSize)
 }
 
 func closeSmart() {

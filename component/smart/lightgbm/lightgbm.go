@@ -27,10 +27,9 @@ const (
 )
 
 var (
-	globalModel   *WeightModel
-	modelInitOnce sync.Once
-
-	reloadModelSF = singleflight.Group[bool]{StoreResult: false}
+	smartModel   *WeightModel
+	reloadModel  = singleflight.Group[bool]{StoreResult: false}
+	modelInit    = singleflight.Group[*WeightModel]{StoreResult: false}
 
 	asnNumberRegex = regexp.MustCompile(`^(\d+)`)
 	domainRegex    = regexp.MustCompile(`([a-zA-Z0-9-]+)(\.[a-zA-Z0-9-]+)+$`)
@@ -441,56 +440,62 @@ type ModelInput struct {
 }
 
 func GetModel() *WeightModel {
-	modelInitOnce.Do(func() {
-		globalModel = &WeightModel{}
+    if smartModel != nil {
+        return smartModel
+    }
 
-		modelPath := C.Path.SmartModel()
+    model, err, _ := modelInit.Do("init", func() (*WeightModel, error) {
+        m := &WeightModel{}
+        modelPath := C.Path.SmartModel()
 
-		if _, err := os.Stat(modelPath); err == nil {
-			if err := globalModel.loadModel(modelPath); err != nil {
-				log.Warnln("[Smart] Model.bin invalid, remove and download: %v", err)
+        if _, err := os.Stat(modelPath); err == nil {
+            if err := m.loadModel(modelPath); err != nil {
+                log.Warnln("[Smart] Model.bin invalid, remove and download: %v", err)
+                if rmErr := os.Remove(modelPath); rmErr != nil {
+                    log.Errorln("[Smart] Failed to remove invalid Model.bin: %v", rmErr)
+                    return nil, rmErr
+                }
 
-				if rmErr := os.Remove(modelPath); rmErr != nil {
-					log.Errorln("[Smart] Failed to remove invalid Model.bin: %v", rmErr)
-					globalModel = nil
-					return
-				}
+                if downloadErr := downloadModel(modelPath); downloadErr != nil {
+                    log.Errorln("[Smart] Failed to download Model.bin: %v", downloadErr)
+                    return nil, downloadErr
+                }
 
-				if downloadErr := downloadModel(modelPath); downloadErr != nil {
-					log.Errorln("[Smart] Failed to download Model.bin: %v", downloadErr)
-					globalModel = nil
-					return
-				}
+                if reloadErr := m.loadModel(modelPath); reloadErr != nil {
+                    log.Errorln("[Smart] Failed to load downloaded Model.bin: %v", reloadErr)
+                    return nil, reloadErr
+                }
 
-				if reloadErr := globalModel.loadModel(modelPath); reloadErr != nil {
-					log.Errorln("[Smart] Failed to load downloaded Model.bin: %v", reloadErr)
-					globalModel = nil
-					return
-				}
+                log.Infoln("[Smart] Model.bin downloaded and loaded successfully")
+            } else {
+                log.Infoln("[Smart] Model file loaded successfully")
+            }
+        } else {
+            log.Infoln("[Smart] Can't find Model.bin, start download")
+            if downloadErr := downloadModel(modelPath); downloadErr != nil {
+                log.Errorln("[Smart] Can't download Model.bin: %v", downloadErr)
+                return nil, downloadErr
+            }
 
-				log.Infoln("[Smart] Model.bin downloaded and loaded successfully")
-			} else {
-				log.Infoln("[Smart] Model file loaded successfully")
-			}
-		} else {
-			log.Infoln("[Smart] Can't find Model.bin, start download")
-			if downloadErr := downloadModel(modelPath); downloadErr != nil {
-				log.Errorln("[Smart] Can't download Model.bin: %v", downloadErr)
-				globalModel = nil
-				return
-			}
+            if loadErr := m.loadModel(modelPath); loadErr != nil {
+                log.Errorln("[Smart] Failed to load downloaded Model.bin: %v", loadErr)
+                return nil, loadErr
+            }
 
-			if loadErr := globalModel.loadModel(modelPath); loadErr != nil {
-				log.Errorln("[Smart] Failed to load downloaded Model.bin: %v", loadErr)
-				globalModel = nil
-				return
-			}
+            log.Infoln("[Smart] Download Model.bin finish")
+        }
 
-			log.Infoln("[Smart] Download Model.bin finish")
-		}
-	})
+        return m, nil
+    })
 
-	return globalModel
+    if err != nil {
+        log.Errorln("[Smart] Model init failed: %v", err)
+        return nil
+    }
+
+    smartModel = model
+
+    return smartModel
 }
 
 func (m *WeightModel) loadModel(path string) error {
@@ -529,15 +534,15 @@ func (m *WeightModel) loadModel(path string) error {
 }
 
 func ReloadModel() {
-	if globalModel != nil {
-		success, err, shared := reloadModelSF.Do("reload", func() (bool, error) {
-			globalModel.mutex.Lock()
-			defer globalModel.mutex.Unlock()
+	if smartModel != nil {
+		success, err, _ := reloadModel.Do("reload", func() (bool, error) {
+			smartModel.mutex.Lock()
+			defer smartModel.mutex.Unlock()
 
 			modelPath := C.Path.SmartModel()
 
 			if _, err := os.Stat(modelPath); err == nil {
-				if err := globalModel.loadModel(modelPath); err != nil {
+				if err := smartModel.loadModel(modelPath); err != nil {
 					log.Errorln("[Smart] Failed to reload Model.bin: %v", err)
 					return false, err
 				} else {
@@ -547,10 +552,6 @@ func ReloadModel() {
 			}
 			return false, nil
 		})
-
-		if shared {
-			log.Debugln("[Smart] Model reload was already in progress, waited for completion")
-		}
 
 		if err != nil {
 			log.Errorln("[Smart] Model reload failed: %v", err)
@@ -586,9 +587,9 @@ func GetModelDownloadURL() string {
 	return "https://github.com/vernesong/mihomo/releases/download/LightGBM-Model/Model.bin"
 }
 
-func (m *WeightModel) PredictWeight(input *ModelInput, priorityFactor float64) (float64, bool) {
+func (m *WeightModel) PredictWeight(connSuccess bool, input *ModelInput, priorityFactor float64) (float64, bool) {
 	if m == nil {
-		return m.fallbackPrediction(input, priorityFactor), false
+		return m.fallbackPrediction(connSuccess, input, priorityFactor), false
 	}
 
 	total := input.Success + input.Failure
@@ -602,13 +603,13 @@ func (m *WeightModel) PredictWeight(input *ModelInput, priorityFactor float64) (
 	m.mutex.RUnlock()
 
 	if model == nil {
-		return m.fallbackPrediction(input, priorityFactor), false
+		return m.fallbackPrediction(connSuccess, input, priorityFactor), false
 	}
 
 	// 准备原始特征
 	features := prepareFeatures(input)
 	if len(features) == 0 {
-		return m.fallbackPrediction(input, priorityFactor), false
+		return m.fallbackPrediction(connSuccess, input, priorityFactor), false
 	}
 
 	// 应用特征变换
@@ -621,21 +622,22 @@ func (m *WeightModel) PredictWeight(input *ModelInput, priorityFactor float64) (
 	defer func() {
 		if r := recover(); r != nil {
 			log.Errorln("[Smart] Model prediction panic: %v", r)
-			prediction = m.fallbackPrediction(input, priorityFactor)
+			prediction = m.fallbackPrediction(connSuccess, input, priorityFactor)
 		}
 	}()
 
 	prediction = model.PredictSingle(features, 0)
 
 	if math.IsNaN(prediction) || prediction <= 0 {
-		return m.fallbackPrediction(input, priorityFactor), false
+		return m.fallbackPrediction(connSuccess, input, priorityFactor), false
 	}
 
 	return prediction * priorityFactor, true
 }
 
-func (m *WeightModel) fallbackPrediction(input *ModelInput, priorityFactor float64) float64 {
+func (m *WeightModel) fallbackPrediction(connSuccess bool, input *ModelInput, priorityFactor float64) float64 {
 	return smart.CalculateWeight(
+		connSuccess, 
 		input.Success,
 		input.Failure,
 		input.ConnectTime,
@@ -1071,74 +1073,39 @@ func boolToFloat(b bool) float64 {
 	return 0.0
 }
 
-func CreateModelInputFromStats(
-	success, failure, connectTime, latency int64,
-	uploadTotal, historyUploadTotal, maxUploadRate, historyMaxUploadRate float64,
-	downloadTotal, historyDownloadTotal, maxDownloadRate, historyMaxDownloadRate float64,
-	connectionDuration float64,
-	lastUsed int64,
-	isUDP bool, isTCP bool,
-	metadata *C.Metadata,
-) *ModelInput {
-	var input = &ModelInput{
-		Success:                success,
-		Failure:                failure,
-		ConnectTime:            connectTime,
-		Latency:                latency,
-		UploadTotal:            uploadTotal,
-		HistoryUploadTotal:     historyUploadTotal,
-		MaxuploadRate:          maxUploadRate,
-		HistoryMaxUploadRate:   historyMaxUploadRate,
-		DownloadTotal:          downloadTotal,
-		HistoryDownloadTotal:   historyDownloadTotal,
-		MaxdownloadRate:        maxDownloadRate,
-		HistoryMaxDownloadRate: historyMaxDownloadRate,
-		ConnectionDuration:     connectionDuration,
-		LastUsed:               lastUsed,
-		IsUDP:                  isUDP,
-		IsTCP:                  isTCP,
-	}
+func CreateModelInputFromStatsRecord(record *smart.StatsRecord, metadata *C.Metadata, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate float64) *ModelInput {
+    input := &ModelInput{
+        Success:                int64(record.Success),
+        Failure:                int64(record.Failure),
+        ConnectTime:            record.ConnectTime,
+        Latency:                record.Latency,
+        UploadTotal:            uploadTotal,
+        HistoryUploadTotal:     record.UploadTotal,
+        MaxuploadRate:          maxUploadRate,
+        HistoryMaxUploadRate:   record.MaxUploadRate,
+        DownloadTotal:          downloadTotal,
+        HistoryDownloadTotal:   record.DownloadTotal,
+        MaxdownloadRate:        maxDownloadRate,
+        HistoryMaxDownloadRate: record.MaxDownloadRate,
+        ConnectionDuration:     record.ConnectionDuration,
+        LastUsed:               record.LastUsed.Unix(),
+        IsUDP:                  metadata.NetWork == C.UDP,
+        IsTCP:                  metadata.NetWork == C.TCP,
+    }
 
-	if metadata.DstIPASN == "unknown" {
-		input.DestIPASN = ""
-	} else {
-		input.DestIPASN = metadata.DstIPASN
-	}
-	input.Host, _ = smart.GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
-	if metadata.DstIP.IsValid() {
-		input.DestIP = metadata.DstIP.String()
-	}
-	input.DestPort = metadata.DstPort
-	input.DestGeoIP = metadata.DstGeoIP
+    if metadata.DstIPASN == "unknown" {
+        input.DestIPASN = ""
+    } else {
+        input.DestIPASN = metadata.DstIPASN
+    }
 
-	return input
-}
+    input.Host, _ = smart.GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
+    if metadata.DstIP.IsValid() {
+        input.DestIP = metadata.DstIP.String()
+    }
 
-func CreateModelInputFromStatsRecord(
-	record *smart.StatsRecord, metadata *C.Metadata,
-	uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate float64,
-) *ModelInput {
-	if record == nil {
-		return nil
-	}
+    input.DestPort = metadata.DstPort
+    input.DestGeoIP = metadata.DstGeoIP
 
-	return CreateModelInputFromStats(
-		int64(record.Success),
-		int64(record.Failure),
-		record.ConnectTime,
-		record.Latency,
-		uploadTotal,
-		record.UploadTotal,
-		maxUploadRate,
-		record.MaxUploadRate,
-		downloadTotal,
-		record.DownloadTotal,
-		maxDownloadRate,
-		record.MaxDownloadRate,
-		record.ConnectionDuration,
-		record.LastUsed.Unix(),
-		metadata.NetWork == C.UDP,
-		metadata.NetWork == C.TCP,
-		metadata,
-	)
+    return input
 }
