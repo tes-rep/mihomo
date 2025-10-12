@@ -47,8 +47,8 @@ const (
 	failureRecovery15min     = 15 * time.Minute
 	failureRecovery30min     = 30 * time.Minute
 
-	maxRetries               = 3
-	maxSelected              = 9
+	maxRetries               = 4
+	maxSelected              = 10
 	allowedWeight            = 0.4
 )
 
@@ -270,6 +270,10 @@ func (s *Smart) singleDialContext(ctx context.Context, proxy C.Proxy, metadata *
 	connectTime = time.Since(start).Milliseconds()
 
 	if err != nil {
+		// err if ShouldStopRetry should not record as failed in node stats and stop retry
+		if tunnel.ShouldStopRetry(err) {
+			return nil, connectTime, err
+		}
 		if !errors.Is(err, context.Canceled) {
 			go s.recordConnectionStats("failed", metadata, proxy, connectTime, 0, 0, 0, 0, 0, 0, err)
 		}
@@ -281,23 +285,26 @@ func (s *Smart) singleDialContext(ctx context.Context, proxy C.Proxy, metadata *
 
 func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
 	availableProxies := s.GetProxies(true)
-	triedProxies := make(map[string]bool)
 	metadata.SmartBlock = "normal"
 
 	getBatch := func(proxies []C.Proxy, i int) ([]C.Proxy, time.Duration) {
-		const parallelDials = 3
-		begin := i * parallelDials
-		if begin >= len(proxies) {
-			return nil, 0
+		var batch []C.Proxy
+		if i == 0 {
+			batch = []C.Proxy{proxies[0]}
+		} else {
+			const parallelDials = 3
+			begin := (i-1)*parallelDials + 1
+			if begin >= len(proxies) {
+				return nil, 0
+			}
+			end := begin + parallelDials
+			if end > len(proxies) {
+				end = len(proxies)
+			}
+			batch = proxies[begin:end]
 		}
-		end := begin + parallelDials
-		if end > len(proxies) {
-			end = len(proxies)
-		}
-		batch := proxies[begin:end:end]
 		var historyConnectTime int64
 		for _, p := range batch {
-			triedProxies[p.Name()] = true
 			hct := s.getHistoryConnectStats(metadata, p)
 			if hct > historyConnectTime {
 				historyConnectTime = hct
@@ -342,18 +349,20 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 			p, c, connectTime, err := s.ParallelDialContext(ctxDial, batch, metadata, start, s.singleDialContext)
 			cancel()
 
-			if err == nil {
+			if err != nil {
+				if tunnel.ShouldStopRetry(err) {
+					return nil, err
+				}
+				finalErr = err
+			} else {
 				return s.WrapConnWithMetric(c, p, metadata, connectTime), nil
 			}
-			finalErr = err
 
 			if s.selected != "" && len(proxies) == 1 && proxies[0].Name() == s.selected {
 				break
 			}
 		}
-		if finalErr != nil {
-			s.store.MarkConnectionFailed(s.Name(), s.configName, len(proxies), triedProxies, metadata)
-		}
+
 		return nil, finalErr
 	}
 
@@ -367,84 +376,21 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 }
 
 func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (pc C.PacketConn, err error) {
-	proxies := s.GetProxies(true)
-	triedProxies := make(map[string]bool)
-	metadata.SmartBlock = "normal"
-
-	fillAvailableProxies := func(initialProxies []C.Proxy, allProxies []C.Proxy) []C.Proxy {
-		availableProxies := make([]C.Proxy, 0, len(initialProxies))
-		seen := make(map[string]struct{})
-
-		for _, p := range initialProxies {
-			if p.SupportUDP() {
-				availableProxies = append(availableProxies, p)
-				seen[p.Name()] = struct{}{}
-			}
-		}
-
-		if len(availableProxies) < maxRetries && len(allProxies) >= maxRetries {
-			shuffledProxies := make([]C.Proxy, len(allProxies))
-			copy(shuffledProxies, allProxies)
-			rand.Shuffle(len(shuffledProxies), func(i, j int) {
-				shuffledProxies[i], shuffledProxies[j] = shuffledProxies[j], shuffledProxies[i]
-			})
-			for _, fp := range shuffledProxies {
-				if len(availableProxies) >= maxRetries {
-					break
-				}
-				if _, exists := seen[fp.Name()]; !exists && fp.SupportUDP() {
-					availableProxies = append(availableProxies, fp)
-					seen[fp.Name()] = struct{}{}
-				}
-			}
-		}
-
-		if len(availableProxies) == 0 {
-			shuffledProxies := make([]C.Proxy, len(allProxies))
-			copy(shuffledProxies, allProxies)
-			rand.Shuffle(len(shuffledProxies), func(i, j int) {
-				shuffledProxies[i], shuffledProxies[j] = shuffledProxies[j], shuffledProxies[i]
-			})
-			for _, fp := range shuffledProxies {
-				if len(availableProxies) >= maxRetries {
-					break
-				}
-				if _, exists := seen[fp.Name()]; !exists {
-					availableProxies = append(availableProxies, fp)
-					seen[fp.Name()] = struct{}{}
-				}
-			}
-		}
-
-		return availableProxies
-	}
-
-	var availableProxies []C.Proxy
-
-	if s.selected != "" {
-		for _, p := range proxies {
-			if p.Name() == s.selected {
-				availableProxies = []C.Proxy{p}
-				break
-			}
-		}
-	}
-
-	if len(availableProxies) == 0 {
-		if s.store.CheckNetworkFailure(s.Name(), s.configName) {
-			selectedProxies := s.selectFallbacks(metadata, proxies)
-			availableProxies = fillAvailableProxies(selectedProxies, proxies)
-		} else {
-			selectedProxies := s.selectProxies(metadata, proxies)
-			availableProxies = fillAvailableProxies(selectedProxies, proxies)
-		}
-	}
-
 	var finalErr error
 	var proxy C.Proxy
-	for i := 0; i < maxRetries && i < len(availableProxies); i++ {
+	var availableProxies []C.Proxy
+	
+	proxies := s.GetProxies(true)
+	metadata.SmartBlock = "normal"
+
+	if s.store.CheckNetworkFailure(s.Name(), s.configName) {
+		availableProxies = s.selectFallbacks(metadata, proxies)
+	} else {
+		availableProxies = s.selectProxies(metadata, proxies)
+	}
+	
+	for i := 0; i < len(availableProxies); i++ {
 		proxy = availableProxies[i]
-		triedProxies[proxy.Name()] = true
 		historyConnectTime := s.getHistoryConnectStats(metadata, proxy)
 		const thresholdRatio = 2.0
 		var timeout time.Duration
@@ -832,6 +778,53 @@ func (s *Smart) checkAndRecoverDegradedNodes() {
 	}
 }
 
+func (s *Smart) fillProxies(selected []C.Proxy, weights map[string]float64, all []C.Proxy, minCount int, isUDP bool, metadata *C.Metadata, blockedNodes map[string]bool) []C.Proxy {
+	filtered := make([]C.Proxy, 0, len(selected))
+	for _, p := range selected {
+		if (weights == nil || weights[p.Name()] >= allowedWeight) && (!isUDP || p.SupportUDP()) {
+			filtered = append(filtered, p)
+		}
+	}
+	selected = filtered
+
+	if len(selected) >= minCount {
+		return selected[:minCount]
+	}
+	if len(all) == len(selected) {
+		return selected
+	}
+
+	selectedNames := make(map[string]bool, len(selected))
+	for _, p := range selected {
+		selectedNames[p.Name()] = true
+	}
+
+	remain := make([]C.Proxy, 0)
+	fallbackProxy := s.fallback.Unwrap(metadata, true)
+	for _, p := range all {
+		if !blockedNodes[p.Name()] && !selectedNames[p.Name()] {
+			if w, exists := weights[p.Name()]; (weights == nil || (exists && w >= allowedWeight) || !exists) && (!isUDP || p.SupportUDP()) {
+				if fallbackProxy != nil && fallbackProxy.Name() == p.Name() {
+					selected = append([]C.Proxy{fallbackProxy}, selected...)
+					selectedNames[fallbackProxy.Name()] = true
+					continue
+				}
+				remain = append(remain, p)
+			}
+		}
+	}
+	rand.Shuffle(len(remain), func(i, j int) {
+		remain[i], remain[j] = remain[j], remain[i]
+	})
+	for _, p := range remain {
+		selected = append(selected, p)
+		if len(selected) >= minCount {
+			break
+		}
+	}
+	return selected
+}
+
 func (s *Smart) selectFallbacks(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy {
 	if s.selected != "" {
 		for _, p := range proxies {
@@ -908,58 +901,11 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy
 		return proxies
 	}
 
-	fillProxies := func(selected []C.Proxy, weights map[string]float64, all []C.Proxy, minCount int) []C.Proxy {
-		filtered := make([]C.Proxy, 0, len(selected))
-		for _, p := range selected {
-			if weights == nil || weights[p.Name()] >= allowedWeight {
-				filtered = append(filtered, p)
-			}
-		}
-		selected = filtered
-
-		if len(selected) >= minCount {
-			return selected[:minCount]
-		}
-		if len(all) == len(selected) {
-			return selected
-		}
-
-		selectedNames := make(map[string]bool, len(selected))
-		for _, p := range selected {
-			selectedNames[p.Name()] = true
-		}
-
-		remain := make([]C.Proxy, 0)
-		fallbackProxy := s.fallback.Unwrap(metadata, true)
-		for _, p := range all {
-			if !blockedNodes[p.Name()] && !selectedNames[p.Name()] {
-				if w, exists := weights[p.Name()]; weights == nil || (exists && w >= allowedWeight) || !exists {
-					if fallbackProxy.Name() == p.Name() {
-						selected = append([]C.Proxy{fallbackProxy}, selected...)
-						selectedNames[fallbackProxy.Name()] = true
-						continue
-					}
-					remain = append(remain, p)
-				}
-			}
-		}
-		rand.Shuffle(len(remain), func(i, j int) {
-			remain[i], remain[j] = remain[j], remain[i]
-		})
-		for _, p := range remain {
-			selected = append(selected, p)
-			if len(selected) >= minCount {
-				break
-			}
-		}
-		return selected
-	}
-
 	trySelector := func(target string, weightType string) ([]C.Proxy, map[string]float64) {
 		// 检查解析缓存
 		if cachedProxies := s.store.GetUnwrapResult(s.Name(), s.configName, target); len(cachedProxies) > 0 {
-            return cachedProxies, nil
-        }
+			return cachedProxies, nil
+		}
 
 		// 检查预解析缓存
 		if cachedProxyNames, cachedWeights := s.store.GetPrefetchResult(s.Name(), s.configName, target, weightType); len(cachedProxyNames) != 0 {
@@ -1003,7 +949,7 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy
 			}
 
 			if selected, weights := trySelector(asnNumber, asnWeightType); len(selected) > 0 {
-				if result := fillProxies(selected, weights, proxies, maxSelected); len(result) > 0 {
+				if result := s.fillProxies(selected, weights, proxies, maxSelected, metadata.NetWork == C.UDP, metadata, blockedNodes); len(result) > 0 {
 					return result
 				}
 			}
@@ -1013,7 +959,7 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy
 	// 尝试使用域名信息选择
 	domain, _ := smart.GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
 	if selected, weights := trySelector(domain, weightType); len(selected) > 0 {
-		if result := fillProxies(selected, weights, proxies, maxSelected); len(result) > 0 {
+		if result := s.fillProxies(selected, weights, proxies, maxSelected, metadata.NetWork == C.UDP, metadata, blockedNodes); len(result) > 0 {
 			return result
 		}
 	}
@@ -1540,7 +1486,7 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 	switch status {
 	case "failed":
 		atomicRecord.Add("failure", int64(1))
-		go s.store.MarkConnectionFailed(s.Name(), s.configName, len(s.GetProxies(false)), map[string]bool{proxy.Name(): true}, metadata)
+		go s.store.MarkConnectionFailed(metadata, s.Name(), s.configName, proxy.Name(), domain, len(s.GetProxies(false)))
 	case "closed":
 		atomicRecord.Add("success", int64(1))
 		go s.store.MarkConnectionSuccess(s.Name(), s.configName)
