@@ -798,29 +798,28 @@ func (s *Smart) fillProxies(selected []C.Proxy, weights map[string]float64, all 
 		selectedNames[p.Name()] = true
 	}
 
-	remain := make([]C.Proxy, 0)
 	fallbackProxy := s.fallback.Unwrap(metadata, true)
-	for _, p := range all {
+	if !blockedNodes[fallbackProxy.Name()] && !selectedNames[fallbackProxy.Name()] {
+		if w, exists := weights[fallbackProxy.Name()]; (weights == nil || (exists && w >= allowedWeight) || !exists) && (!isUDP || fallbackProxy.SupportUDP()) {
+			selected = append([]C.Proxy{fallbackProxy}, selected...)
+			selectedNames[fallbackProxy.Name()] = true
+		}
+	}
+
+	indexes := rand.Perm(len(all))
+	for _, idx := range indexes {
+		p := all[idx]
 		if !blockedNodes[p.Name()] && !selectedNames[p.Name()] {
 			if w, exists := weights[p.Name()]; (weights == nil || (exists && w >= allowedWeight) || !exists) && (!isUDP || p.SupportUDP()) {
-				if fallbackProxy != nil && fallbackProxy.Name() == p.Name() {
-					selected = append([]C.Proxy{fallbackProxy}, selected...)
-					selectedNames[fallbackProxy.Name()] = true
-					continue
+				selected = append(selected, p)
+				selectedNames[p.Name()] = true
+				if len(selected) >= minCount {
+					break
 				}
-				remain = append(remain, p)
 			}
 		}
 	}
-	rand.Shuffle(len(remain), func(i, j int) {
-		remain[i], remain[j] = remain[j], remain[i]
-	})
-	for _, p := range remain {
-		selected = append(selected, p)
-		if len(selected) >= minCount {
-			break
-		}
-	}
+
 	return selected
 }
 
@@ -834,13 +833,9 @@ func (s *Smart) selectFallbacks(metadata *C.Metadata, proxies []C.Proxy) []C.Pro
 	}
 
 	fallbacks := make([]C.Proxy, 0, len(proxies))
-	var first C.Proxy
-	if s.fallback != nil {
-		first = s.fallback.Unwrap(metadata, true)
-		if first != nil {
-			fallbacks = append(fallbacks, first)
-		}
-	}
+	first := s.fallback.Unwrap(metadata, true)
+	fallbacks = append(fallbacks, first)
+
 	piv := 0
 	for i, p := range proxies {
 		if p == first {
