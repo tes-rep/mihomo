@@ -734,6 +734,8 @@ func (s *Smart) checkAndRecoverDegradedNodes() {
 
 func (s *Smart) fillProxies(selected []C.Proxy, weights map[string]float64, all []C.Proxy, minCount int, isUDP bool, metadata *C.Metadata) []C.Proxy {
 	blockedNodes := make(map[string]bool)
+	selectedNames := make(map[string]bool, len(selected))
+
 	stateData, _ := s.store.GetNodeStates(s.Name(), s.configName)
 	for nodeName, data := range stateData {
 		var state smart.NodeState
@@ -742,6 +744,10 @@ func (s *Smart) fillProxies(selected []C.Proxy, weights map[string]float64, all 
 				blockedNodes[nodeName] = true
 			}
 		}
+	}
+
+	for _, p := range selected {
+		selectedNames[p.Name()] = true
 	}
 
 	filtered := make([]C.Proxy, 0, len(selected))
@@ -757,11 +763,6 @@ func (s *Smart) fillProxies(selected []C.Proxy, weights map[string]float64, all 
 	}
 	if len(all) == len(selected) {
 		return selected
-	}
-
-	selectedNames := make(map[string]bool, len(selected))
-	for _, p := range selected {
-		selectedNames[p.Name()] = true
 	}
 
 	fallbackProxy := s.fallback.Unwrap(metadata, true)
