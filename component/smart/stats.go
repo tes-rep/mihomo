@@ -51,12 +51,7 @@ type ActiveDomain struct {
 type NodeRank struct {
 	Name   string
 	Rank   string
-	Weight float64
-}
-
-type RankingData struct {
-	Ranking     []NodeRank `json:"ranking"`
-	LastUpdated time.Time  `json:"last_updated"`
+	Weight int
 }
 
 type domainMinHeap []ActiveDomain
@@ -266,14 +261,14 @@ func (r *AtomicStatsRecord) SetWeight(weightType string, value float64) {
 	})
 }
 
-// 获取节点权重排名
+// 获取节点权重排名缓存
 func (s *Store) GetNodeWeightRankingCache(group, config string) ([]NodeRank, error) {
 	ops := getGlobalQueueSnapshot()
 	for _, op := range ops {
 		if op.Type == OpSaveRanking && op.Group == group && op.Config == config {
-			var rankingData RankingData
-			if err := json.Unmarshal(op.Data, &rankingData); err == nil && len(rankingData.Ranking) > 0 {
-				return rankingData.Ranking, nil
+			var ranking []NodeRank
+			if err := json.Unmarshal(op.Data, &ranking); err == nil && len(ranking) > 0 {
+				return ranking, nil
 			}
 		}
 	}
@@ -285,15 +280,16 @@ func (s *Store) GetNodeWeightRankingCache(group, config string) ([]NodeRank, err
 	}
 
 	for _, data := range rawResult {
-		var rankingData RankingData
-		if err := json.Unmarshal(data, &rankingData); err == nil && len(rankingData.Ranking) > 0 {
-			return rankingData.Ranking, nil
+		var ranking []NodeRank
+		if err := json.Unmarshal(data, &ranking); err == nil && len(ranking) > 0 {
+			return ranking, nil
 		}
 	}
 
 	return []NodeRank{}, nil
 }
 
+// 获取节点权重排名
 func (s *Store) GetNodeWeightRanking(group, config, testUrl string, proxies []C.Proxy) ([]NodeRank, error) {
 	var result []NodeRank
 	if len(proxies) == 0 {
@@ -309,179 +305,41 @@ func (s *Store) GetNodeWeightRanking(group, config, testUrl string, proxies []C.
 		allNodes[p.Name()] = true
 	}
 
-	type nodeData struct {
-		tcpWeights    float64
-		tcpSamples    int
-		udpWeights    float64
-		udpSamples    int
-		asnSamples    int
-		finalWeight   float64
-		degradeFactor float64
-		alive         bool
-	}
-	nodeDataMap := make(map[string]*nodeData, len(allNodes))
+	globalCacheParams.mutex.RLock()
+	prefetchLimit := globalCacheParams.PrefetchLimit
+	globalCacheParams.mutex.RUnlock()
 
-	stateData, _ := s.GetNodeStates(group, config)
-	var nodeState NodeState
+	activeDomains := s.GetActiveDomains(group, config, prefetchLimit)
 
-	for nodeName, data := range stateData {
-		if !allNodes[nodeName] {
-			continue
-		}
-		if json.Unmarshal(data, &nodeState) == nil {
-			if !nodeState.BlockedUntil.IsZero() && nodeState.BlockedUntil.After(time.Now()) {
-				continue
-			}
-			nodeDataMap[nodeName] = &nodeData{
-				degradeFactor: func() float64 {
-					if nodeState.Degraded {
-						return nodeState.DegradedFactor
-					}
-					return 1.0
-				}(),
-				alive: aliveNodes[nodeName],
+	nodeCounts := make(map[string]int)
+	for _, ad := range activeDomains {
+		nodes, _ := s.GetPrefetchResult(group, config, ad.Domain, ad.ASN, ad.IsUDP)
+		if len(nodes) > 0 {
+			node := nodes[0]
+			if allNodes[node] {
+				nodeCounts[node]++
 			}
 		}
 	}
 
-	for nodeName := range allNodes {
-		if _, exists := nodeDataMap[nodeName]; !exists {
-			nodeDataMap[nodeName] = &nodeData{
-				degradeFactor: 1.0,
-				alive:         aliveNodes[nodeName],
-			}
-		}
+	for node := range allNodes {
+		weight := nodeCounts[node]
+		result = append(result, NodeRank{Name: node, Weight: weight, Rank: ""})
 	}
 
-	now := time.Now().Unix()
-	decayCache := make(map[int64]float64, 72)
-	minDecay := math.Max(0.1, 0.4-float64(len(allNodes))*0.005)
-
-	getTimeDecay := func(lastUsedTime int64) float64 {
-		return GetTimeDecayWithCache(lastUsedTime, now, minDecay, decayCache)
-	}
-
-	allStats, err := s.GetAllStats(group, config)
-	if err != nil {
-		return nil, err
-	}
-
-	var statsRecord StatsRecord
-
-	for _, nodeStats := range allStats {
-		for nodeName, data := range nodeStats {
-			nodeData, ok := nodeDataMap[nodeName]
-			if !ok {
-				continue
-			}
-
-			statsRecord = StatsRecord{}
-			if json.Unmarshal(data, &statsRecord) != nil {
-				continue
-			}
-
-			samples := statsRecord.Success + statsRecord.Failure
-			if samples < DefaultMinSampleCount {
-				continue
-			}
-
-			timeDecay := getTimeDecay(statsRecord.LastUsed.Unix())
-			timeDecayedSamples := float64(samples) * timeDecay
-
-			if statsRecord.Weights == nil {
-				continue
-			}
-
-			// 处理TCP权重
-			if tcpWeight, ok := statsRecord.Weights[WeightTypeTCP]; ok && tcpWeight > 0 {
-				nodeData.tcpWeights += tcpWeight * timeDecay * float64(samples)
-				nodeData.tcpSamples += int(timeDecayedSamples)
-			}
-
-			// 处理UDP权重
-			if udpWeight, ok := statsRecord.Weights[WeightTypeUDP]; ok && udpWeight > 0 {
-				nodeData.udpWeights += udpWeight * timeDecay * float64(samples)
-				nodeData.udpSamples += int(timeDecayedSamples)
-			}
-
-			// 处理ASN权重 - 只统计数量，具体权重在第二次遍历中处理
-			for key := range statsRecord.Weights {
-				if strings.HasPrefix(key, WeightTypeTCPASN) || strings.HasPrefix(key, WeightTypeUDPASN) {
-					nodeData.asnSamples++
-				}
-			}
-		}
-	}
-
-	// 第二次遍历处理ASN权重
-	for _, nodeStats := range allStats {
-		for nodeName, data := range nodeStats {
-			nodeData, ok := nodeDataMap[nodeName]
-			if !ok || nodeData.asnSamples == 0 {
-				continue
-			}
-
-			statsRecord = StatsRecord{}
-			if json.Unmarshal(data, &statsRecord) != nil {
-				continue
-			}
-
-			timeDecay := getTimeDecay(statsRecord.LastUsed.Unix())
-
-			// ASN权重贡献限制为25%
-			for key, weight := range statsRecord.Weights {
-				if strings.HasPrefix(key, WeightTypeTCPASN) && weight > 0 {
-					asnBonus := weight * timeDecay * 0.25
-					nodeData.tcpWeights += asnBonus
-					nodeData.tcpSamples++
-				} else if strings.HasPrefix(key, WeightTypeUDPASN) && weight > 0 {
-					asnBonus := weight * timeDecay * 0.25
-					nodeData.udpWeights += asnBonus
-					nodeData.udpSamples++
-				}
-			}
-		}
-	}
-
-	result = result[:0]
-	allZero := true
-	for nodeName := range allNodes {
-		data := nodeDataMap[nodeName]
-		finalWeight := 0.0
-		if data.tcpSamples > 0 {
-			tcpAvgWeight := data.tcpWeights / float64(data.tcpSamples)
-			tcpFinalWeight := tcpAvgWeight * data.degradeFactor
-			finalWeight = tcpFinalWeight
-		}
-		if data.udpSamples > 0 {
-			udpAvgWeight := data.udpWeights / float64(data.udpSamples)
-			udpFinalWeight := udpAvgWeight * data.degradeFactor
-			if finalWeight > 0 {
-				finalWeight = (finalWeight + udpFinalWeight) / 2
-			} else {
-				finalWeight = udpFinalWeight
-			}
-		}
-		if finalWeight != 0 {
-			allZero = false
-		}
-		result = append(result, NodeRank{Name: nodeName, Weight: finalWeight})
-	}
-
-	// alive 节点在前，非 alive 节点在后，内部按权重降序
 	sort.Slice(result, func(i, j int) bool {
-		ai := nodeDataMap[result[i].Name].alive
-		aj := nodeDataMap[result[j].Name].alive
+		ai := aliveNodes[result[i].Name]
+		aj := aliveNodes[result[j].Name]
 		if ai != aj {
 			return ai
 		}
 		return result[i].Weight > result[j].Weight
 	})
 
-	if !allZero && len(result) > 0 {
+	if len(result) > 0 {
 		aliveCount := 0
 		for _, r := range result {
-			if nodeDataMap[r.Name].alive {
+			if aliveNodes[r.Name] {
 				aliveCount++
 			}
 		}
@@ -534,12 +392,7 @@ func (s *Store) GetNodeWeightRanking(group, config, testUrl string, proxies []C.
 
 // 存储节点权重排名
 func (s *Store) StoreNodeWeightRanking(group, config string, ranking []NodeRank) error {
-	rankingData := RankingData{
-		Ranking:     ranking,
-		LastUpdated: time.Now(),
-	}
-
-	data, err := json.Marshal(rankingData)
+	data, err := json.Marshal(ranking)
 	if err != nil {
 		return fmt.Errorf("failed to serialize ranking data: %w", err)
 	}
@@ -862,10 +715,6 @@ func (s *Store) RunPrefetch(group, config string, proxyMap map[string]string) in
 	globalCacheParams.mutex.RLock()
 	prefetchLimit := globalCacheParams.PrefetchLimit
 	globalCacheParams.mutex.RUnlock()
-
-	if prefetchLimit <= 0 {
-		prefetchLimit = MinPrefetchDomainsLimit
-	}
 
 	activeDomains := s.GetActiveDomains(group, config, prefetchLimit)
 
@@ -1286,14 +1135,14 @@ func (s *Store) RemoveNodesData(group, config string, nodes []string) error {
 		return firstErr
 	}
 	for path, data := range rankingResults {
-		var rd RankingData
-		if err := json.Unmarshal(data, &rd); err != nil {
+		var ranking []NodeRank
+		if err := json.Unmarshal(data, &ranking); err != nil {
 			continue
 		}
 
 		changed := false
-		newRanking := make([]NodeRank, 0, len(rd.Ranking))
-		for _, rank := range rd.Ranking {
+		newRanking := make([]NodeRank, 0, len(ranking))
+		for _, rank := range ranking {
 			toRemove := false
 			for _, node := range nodes {
 				if rank.Name == node {
@@ -1306,16 +1155,15 @@ func (s *Store) RemoveNodesData(group, config string, nodes []string) error {
 				newRanking = append(newRanking, rank)
 			}
 		}
-		rd.Ranking = newRanking
 
 		dbKey := path
 		cacheKey := FormatCacheKey(KeyTypeRanking, config, group, "")
 
 		if changed {
-			if len(rd.Ranking) == 0 {
+			if len(newRanking) == 0 {
 				s.DeleteCacheResult(KeyTypeRanking, config, group, "", "")
 			} else {
-				newData, merr := json.Marshal(rd)
+				newData, merr := json.Marshal(newRanking)
 				if merr != nil {
 					if firstErr == nil {
 						firstErr = merr
