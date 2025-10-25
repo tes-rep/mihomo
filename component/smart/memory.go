@@ -89,54 +89,33 @@ func (s *Store) StorePrefetchResult(group, config string, target string, asnNumb
 		return
 	}
 
-	weightType := WeightTypeTCP
+	targetCacheKey := FormatCacheKey(KeyTypePrefetch, config, group, target)
+
+	var pm PrefetchMap
+	if value, found := GetCacheValue(targetCacheKey); found {
+		if bv, ok := value.([]byte); ok {
+			json.Unmarshal(bv, &pm)
+		}
+	}
+	nodeWeight := NodeWithWeight{Nodes: proxyNames, Weights: weights}
 	if isUDP {
-		weightType = WeightTypeUDP
-	}
-	if asnNumber != "" {
-		if isUDP {
-			weightType = WeightTypeUDPASN + ":" + asnNumber
-		} else {
-			weightType = WeightTypeTCPASN + ":" + asnNumber
-		}
-	}
-
-	cacheKey := FormatCacheKey(KeyTypePrefetch, config, group, target)
-
-	var prefetchMap PrefetchMap
-	existingValue, found := GetCacheValue(cacheKey)
-	if found {
-		switch existingMap := existingValue.(type) {
-		case PrefetchMap:
-			prefetchMap = make(PrefetchMap, len(existingMap)+1)
-			for wt, nodeWeight := range existingMap {
-				prefetchMap[wt] = nodeWeight
-			}
-		case []byte:
-			var pm PrefetchMap
-			if json.Unmarshal(existingMap, &pm) == nil {
-				prefetchMap = make(PrefetchMap, len(pm)+1)
-				for wt, nodeWeight := range pm {
-					prefetchMap[wt] = nodeWeight
-				}
-			} else {
-				prefetchMap = make(PrefetchMap)
-			}
-		default:
-			prefetchMap = make(PrefetchMap)
-		}
+		pm.UDP = nodeWeight
 	} else {
-		prefetchMap = make(PrefetchMap)
+		pm.TCP = nodeWeight
 	}
-
-	prefetchMap[weightType] = NodeWithWeight{
-		Nodes:   proxyNames,
-		Weights: weights,
-	}
-
-	data, err := json.Marshal(prefetchMap)
+	data, err := json.Marshal(pm)
 	if err != nil {
 		return
+	}
+	SetCacheValue(targetCacheKey, data)
+
+	if asnNumber != "" && !cdnASNs[asnNumber] {
+		asnCacheKey := FormatCacheKey(KeyTypePrefetch, config, group, asnNumber)
+		refData, err := json.Marshal(PrefetchMap{Ref: targetCacheKey})
+		if err != nil {
+			return
+		}
+		SetCacheValue(asnCacheKey, refData)
 	}
 
 	appendToGlobalQueue(StoreOperation{
@@ -148,7 +127,6 @@ func (s *Store) StorePrefetchResult(group, config string, target string, asnNumb
 	})
 
 	needFlush := len(getGlobalQueueSnapshot()) >= GetBatchSaveThreshold()
-
 	if needFlush {
 		go s.FlushQueue(true)
 	}
@@ -160,48 +138,60 @@ func (s *Store) GetPrefetchResult(group, config string, target string, asnNumber
 		return nil, nil
 	}
 
-	findResult := func(prefetchMap PrefetchMap) ([]string, []float64) {
-		if asnNumber != "" {
-			weightType := WeightTypeTCPASN + ":" + asnNumber
-			if isUDP {
-				weightType = WeightTypeUDPASN + ":" + asnNumber
-			}
-			if res, exists := prefetchMap[weightType]; exists {
-				if len(res.Nodes) > 0 && len(res.Weights) == len(res.Nodes) {
-					return res.Nodes, res.Weights
-				}
-			}
+	findResult := func(pm PrefetchMap) ([]string, []float64) {
+		var res NodeWithWeight
+		if isUDP {
+			res = pm.UDP
 		} else {
-			weightType := WeightTypeTCP
-			if isUDP {
-				weightType = WeightTypeUDP
-			}
-			if res, exists := prefetchMap[weightType]; exists {
-				if len(res.Nodes) > 0 && len(res.Weights) == len(res.Nodes) {
-					return res.Nodes, res.Weights
-				}
-			}
-			asnPrefix := WeightTypeTCPASN + ":"
-			if isUDP {
-				asnPrefix = WeightTypeUDPASN + ":"
-			}
-			for wt, res := range prefetchMap {
-				if strings.HasPrefix(wt, asnPrefix) {
-					if len(res.Nodes) > 0 && len(res.Weights) == len(res.Nodes) {
-						return res.Nodes, res.Weights
+			res = pm.TCP
+		}
+		if len(res.Nodes) > 0 && len(res.Weights) == len(res.Nodes) {
+			return res.Nodes, res.Weights
+		}
+		return nil, nil
+	}
+
+	if asnNumber != "" && !cdnASNs[asnNumber] {
+		asnCacheKey := FormatCacheKey(KeyTypePrefetch, config, group, asnNumber)
+		if value, found := GetCacheValue(asnCacheKey); found {
+			if bv, ok := value.([]byte); ok {
+				var pm PrefetchMap
+				if json.Unmarshal(bv, &pm) == nil && pm.Ref != "" {
+					if refValue, refFound := GetCacheValue(pm.Ref); refFound {
+						if refBv, refOk := refValue.([]byte); refOk {
+							var refPm PrefetchMap
+							if json.Unmarshal(refBv, &refPm) == nil {
+								if nodes, weights := findResult(refPm); nodes != nil {
+									return nodes, weights
+								}
+							}
+						}
 					}
 				}
 			}
 		}
-		return nil, nil
+	}
+
+	if asnNumber == "" || cdnASNs[asnNumber] {
+		targetCacheKey := FormatCacheKey(KeyTypePrefetch, config, group, target)
+		if value, found := GetCacheValue(targetCacheKey); found {
+			if bv, ok := value.([]byte); ok {
+				var pm PrefetchMap
+				if json.Unmarshal(bv, &pm) == nil {
+					if nodes, weights := findResult(pm); nodes != nil {
+						return nodes, weights
+					}
+				}
+			}
+		}
 	}
 
 	ops := getGlobalQueueSnapshot()
 	for _, op := range ops {
 		if op.Type == OpSavePrefetch && op.Group == group && op.Config == config && op.Target == target {
-			var prefetchMap PrefetchMap
-			if err := json.Unmarshal(op.Data, &prefetchMap); err == nil {
-				if nodes, weights := findResult(prefetchMap); nodes != nil {
+			var pm PrefetchMap
+			if err := json.Unmarshal(op.Data, &pm); err == nil {
+				if nodes, weights := findResult(pm); nodes != nil {
 					return nodes, weights
 				}
 			}
@@ -215,9 +205,9 @@ func (s *Store) GetPrefetchResult(group, config string, target string, asnNumber
 	}
 
 	for _, data := range rawResult {
-		var prefetchMap PrefetchMap
-		if err := json.Unmarshal(data, &prefetchMap); err == nil {
-			if nodes, weights := findResult(prefetchMap); nodes != nil {
+		var pm PrefetchMap
+		if err := json.Unmarshal(data, &pm); err == nil {
+			if nodes, weights := findResult(pm); nodes != nil {
 				return nodes, weights
 			}
 		}
@@ -255,8 +245,8 @@ func (s *Store) LoadAllPrefetchResults(group, config string, limit int) int {
 			continue
 		}
 
-		var prefetchMap PrefetchMap
-		if err := json.Unmarshal(v, &prefetchMap); err != nil {
+		var pm PrefetchMap
+		if err := json.Unmarshal(v, &pm); err != nil {
 			parseFailures++
 			continue
 		}

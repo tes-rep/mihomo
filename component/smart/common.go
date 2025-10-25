@@ -169,7 +169,11 @@ type (
 		Weights []float64 `json:"weights"`
 	}
 
-	PrefetchMap map[string]NodeWithWeight
+	PrefetchMap struct {
+		TCP NodeWithWeight `json:"tcp,omitempty"`
+		UDP NodeWithWeight `json:"udp,omitempty"`
+		Ref string         `json:"ref,omitempty"`
+	}
 )
 
 func NewStore(newdb *bbolt.DB) *Store {
