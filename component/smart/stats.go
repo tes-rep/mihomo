@@ -450,14 +450,15 @@ func (s *Store) GetBestProxyForTarget(group, config, target, asnNumber string, i
 	}
 
 	nodesWithWeight := make(map[string]float64)
-	nodeSamples := make(map[string]int)
 
-	// 优先使用ASN，对比域名结果取较小权重进行修正
+	// 优先使用ASN，取较小权重排序并对cdnASNs进行修正
 	if asnNumber != "" {
 		asnWeightType := WeightTypeTCPASN + ":" + asnNumber
 		if isUDP {
 			asnWeightType = WeightTypeUDPASN + ":" + asnNumber
 		}
+
+		nodeWeights := make(map[string][]float64)
 
 		for _, domainStats := range allStatsMap {
 			for nodeName, data := range domainStats {
@@ -468,20 +469,22 @@ func (s *Store) GetBestProxyForTarget(group, config, target, asnNumber string, i
 				if record.Weights != nil {
 					if weight, ok := record.Weights[asnWeightType]; ok && weight > 0 {
 						timeDecay := getTimeDecay(record.LastUsed.Unix())
-						nodesWithWeight[nodeName] += weight * timeDecay
-						nodeSamples[nodeName]++
+						decayedWeight := weight * timeDecay
+						nodeWeights[nodeName] = append(nodeWeights[nodeName], decayedWeight)
 					}
 				}
 			}
 		}
 
-		for nodeName, totalWeight := range nodesWithWeight {
-			samples := nodeSamples[nodeName]
-			if samples >= DefaultMinSampleCount {
-				avgWeight := totalWeight / float64(samples)
-				nodesWithWeight[nodeName] = avgWeight
-			} else {
-				delete(nodesWithWeight, nodeName)
+		for nodeName, weights := range nodeWeights {
+			if len(weights) >= DefaultMinSampleCount {
+				minWeight := math.MaxFloat64
+				for _, w := range weights {
+					if w < minWeight {
+						minWeight = w
+					}
+				}
+				nodesWithWeight[nodeName] = minWeight
 			}
 		}
 
@@ -512,12 +515,10 @@ func (s *Store) GetBestProxyForTarget(group, config, target, asnNumber string, i
 			if state, exists := nodeStatesMap[nodeName]; exists && state.Degraded {
 				decayedWeight *= state.DegradedFactor
 			}
-			if existingWeight, exists := nodesWithWeight[nodeName]; exists {
-				if decayedWeight < existingWeight && (existingWeight - decayedWeight) / existingWeight >= 0.3 {
+			if _, exists := nodesWithWeight[nodeName]; !exists {
+				if asnNumber == "" || cdnASNs[asnNumber] {
 					nodesWithWeight[nodeName] = decayedWeight
 				}
-			} else if asnNumber == "" || cdnASNs[asnNumber] {
-				nodesWithWeight[nodeName] = decayedWeight
 			}
 		}
 	}
@@ -1034,10 +1035,10 @@ func (s *Store) RemoveNodesData(group, config string, nodes []string) error {
 	}
 
 	domainNodePairs := make(map[string][]string)
+	var firstErr error
 
 	// 清理 stats
 	statsPrefix := FormatDBKey("smart", KeyTypeStats, config, group, "")
-	var firstErr error
 	statsResults, err := s.DBViewPrefixScan(statsPrefix, -1)
 	if err != nil {
 		return err
@@ -1059,7 +1060,7 @@ func (s *Store) RemoveNodesData(group, config string, nodes []string) error {
 	prefetchResults, err := s.DBViewPrefixScan(prefetchPrefix, -1)
 	if err != nil {
 		if firstErr == nil {
-			return err
+			firstErr = err
 		}
 		return firstErr
 	}
@@ -1079,27 +1080,46 @@ func (s *Store) RemoveNodesData(group, config string, nodes []string) error {
 		}
 
 		changed := false
-		for wt, nw := range pm {
-			if len(nw.Nodes) == 0 {
-				continue
-			}
-			newNodes := make([]string, 0, len(nw.Nodes))
-			newWeights := make([]float64, 0, len(nw.Weights))
-			for i, node := range nw.Nodes {
-				if _, toRemove := nodeSet[node]; toRemove {
+
+		if len(pm.TCP.Nodes) > 0 {
+			newNodes := make([]string, 0, len(pm.TCP.Nodes))
+			newWeights := make([]float64, 0, len(pm.TCP.Weights))
+			for i, node := range pm.TCP.Nodes {
+				if _, toRemove := nodeSet[node]; !toRemove {
+					newNodes = append(newNodes, node)
+					if i < len(pm.TCP.Weights) {
+						newWeights = append(newWeights, pm.TCP.Weights[i])
+					}
+				} else {
 					changed = true
-					continue
-				}
-				newNodes = append(newNodes, node)
-				if i < len(nw.Weights) {
-					newWeights = append(newWeights, nw.Weights[i])
 				}
 			}
 			if len(newNodes) == 0 {
-				delete(pm, wt)
+				pm.TCP = NodeWithWeight{}
 				changed = true
-			} else if len(newNodes) != len(nw.Nodes) {
-				pm[wt] = NodeWithWeight{Nodes: newNodes, Weights: newWeights}
+			} else {
+				pm.TCP = NodeWithWeight{Nodes: newNodes, Weights: newWeights}
+			}
+		}
+
+		if len(pm.UDP.Nodes) > 0 {
+			newNodes := make([]string, 0, len(pm.UDP.Nodes))
+			newWeights := make([]float64, 0, len(pm.UDP.Weights))
+			for i, node := range pm.UDP.Nodes {
+				if _, toRemove := nodeSet[node]; !toRemove {
+					newNodes = append(newNodes, node)
+					if i < len(pm.UDP.Weights) {
+						newWeights = append(newWeights, pm.UDP.Weights[i])
+					}
+				} else {
+					changed = true
+				}
+			}
+			if len(newNodes) == 0 {
+				pm.UDP = NodeWithWeight{}
+				changed = true
+			} else {
+				pm.UDP = NodeWithWeight{Nodes: newNodes, Weights: newWeights}
 			}
 		}
 
@@ -1107,7 +1127,7 @@ func (s *Store) RemoveNodesData(group, config string, nodes []string) error {
 		cacheKey := FormatCacheKey(KeyTypePrefetch, config, group, target)
 
 		if changed {
-			if len(pm) == 0 {
+			if len(pm.TCP.Nodes) == 0 && len(pm.UDP.Nodes) == 0 {
 				s.DeleteCacheResult(KeyTypePrefetch, config, group, target, "")
 			} else {
 				newData, merr := json.Marshal(pm)
@@ -1130,7 +1150,7 @@ func (s *Store) RemoveNodesData(group, config string, nodes []string) error {
 	rankingResults, err := s.DBViewPrefixScan(rankingPrefix, -1)
 	if err != nil {
 		if firstErr == nil {
-			return err
+			firstErr = err
 		}
 		return firstErr
 	}

@@ -764,6 +764,9 @@ func (s *Smart) fillProxies(selected []C.Proxy, weights map[string]float64, all 
 	if len(all) == len(selected) {
 		return selected
 	}
+	if len(selectedNames) == len(all) {
+		return selected
+	}
 
 	fallbackProxy := s.fallback.Unwrap(metadata, true)
 	if !blockedNodes[fallbackProxy.Name()] && !selectedNames[fallbackProxy.Name()] && fallbackProxy.AliveForTestUrl(s.testUrl) {
@@ -784,6 +787,9 @@ func (s *Smart) fillProxies(selected []C.Proxy, weights map[string]float64, all 
 					break
 				}
 			}
+		}
+		if len(selectedNames) == len(all) {
+			break
 		}
 	}
 
